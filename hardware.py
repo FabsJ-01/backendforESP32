@@ -70,6 +70,14 @@ def process_scanned_student(scanned_uid):
 
         if shared_state.coin_amount == 0 and (time.time() - shared_state.last_coin_time > 40.0):
             print(f"\n⏳ Kiosk Session Timeout. Walang baryang hinulog.")
+            # === BAGO: Ipadala sa ESP32 na mag-reset (para mapatay ang STATUS_LED
+            # at maghintay ulit ng bagong scan) - dating naiiwan itong naka-ON. ===
+            if shared_state.esp32:
+                try:
+                    with shared_state.serial_lock:
+                        shared_state.esp32.write(b'TIMEOUT_RESET\n')
+                except Exception as e:
+                    print(f"⚠️ Serial Write Error (TIMEOUT_RESET): {e}")
             shared_state.is_coin_accumulation_mode = False
             break
 
@@ -271,13 +279,12 @@ def start_h2o_core_system():
                                 f"🪙 Total Coins: ₱{shared_state.coin_amount} ({shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO}mL).",
                                 "#f1c40f"
                             )
-
-                        try:
-                            db.reference(f'users/{shared_state.active_student_uid}').update(
-                                {'last_credits': shared_state.coin_amount, 'is_scanning': True}
-                            )
-                        except Exception as cloud_err:
-                            print(f"⚠️ Cloud sync error: {cloud_err}")
+                        # NOTE: Tinanggal na ang per-coin na Firebase update dito -
+                        # dating nagpapadala ito ng update sa BAWAT piso na nahuhulog
+                        # (kaya paulit-ulit na "credited 1, 2, 3..." na notification
+                        # sa mobile app). Isang beses na lang ito ia-update, pagkatapos
+                        # ng buong coin session (tignan sa itaas, matapos ang while
+                        # loop ng coin accumulation - naroon na ang final update).
 
                 # 3. BUTTON PAUSE/RESUME HANDLER
                 elif hardware_data == "PUMP_PAUSED":
