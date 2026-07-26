@@ -144,9 +144,11 @@ class H2OHubKioskSetup(ctk.CTk):
 
     def update_status_label(self, text, color):
         def adjust_ui():
+            print(f"🖥️ [GUI UPDATE ATTEMPT]: {text}")  # DEBUG: para malaman kung tinatawag talaga ito
             bg_color = "#FCE8E6" if color in ["#e74c3c", "#EF4444", "#DC2626"] else ("#FEF3C7" if color in ["#f1c40f", "#F59E0B"] else "#E6F4EA")
             self.system_status_label.configure(text=text, text_color=color, fg_color=bg_color)
-            
+            self.system_status_label.update_idletasks()  # pilitin ang redraw
+
         self.after(0, adjust_ui)
 
     def confirm_hardware_reset(self):

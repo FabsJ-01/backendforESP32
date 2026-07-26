@@ -1,31 +1,73 @@
 import time
 import os
 import json
+import threading
 import customtkinter as ctk
+import serial.tools.list_ports
 
 # --- GLOBAL CONFIGURATION FOR GUI & SYSTEM ---
-SERIAL_PORT = 'COM3'
-BAUD_RATE = 115200
-CONFIG_FILE = "config.json" 
 
-VENDO_ID = "vendo_004" 
+def find_esp32_port():
+    """
+    Awtomatikong hahanapin ang ESP32-S3 sa mga available na USB ports,
+    gamit ang Espressif VID (303A) sa halip na naka-fix na port name.
+    Babalik sa fallback ports kung walang mahanap.
+    """
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if port.vid == 0x303A:
+            print(f"✅ Nahanap ang ESP32-S3 sa: {port.device}")
+            return port.device
+
+    print("⚠️ Walang nahanap na Espressif device, sinusubukan ang fallback ports...")
+    for fallback in ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0']:
+        if os.path.exists(fallback):
+            print(f"⚠️ Gumagamit ng fallback port: {fallback}")
+            return fallback
+
+    print("❌ Walang nahanap na anumang serial port!")
+    return None
+
+SERIAL_PORT = find_esp32_port()
+BAUD_RATE = 115200
+CONFIG_FILE = "config.json"
+
+VENDO_ID = "vendo_004"
 VENDO_NAME = "Lobby Dispenser 1"
 
-current_water_level = 16000 
-active_student_uid = None  
+current_water_level = 16000
+active_student_uid = None
 esp32 = None
-app_instance = None  
+# Lock para siguraduhing IISANG thread lang ang gumagalaw sa serial port
+# sa isang pagkakataon - iniiwasan ang corruption/garbled data na dulot ng
+# sabay-sabay na read/write mula sa magkaibang threads.
+serial_lock = threading.Lock()
+app_instance = None
 
 # GLOBAL VARIABLES PARA SA ASYNCHRONOUS COIN & FLOW TRACKING
-LIVE_ML_PER_PESO = 100 
+LIVE_ML_PER_PESO = 100
+# === FIXED PHYSICAL CALIBRATION CONSTANT ===
+# Ito ay HINDI presyo/ratio (hindi ito babaguhin ng Admin Web) - ito ay
+# totoong bilis ng pump/tubo mismo, base sa calibration test:
+# 2500ms = 100mL -> MS_PER_ML = 2500 / 100 = 25.0
+# I-update lang ito kung magbago ang PHYSICAL setup (bagong pump, ibang tubo, atbp.)
+MS_PER_ML = 25.0
 coin_amount = 0
 last_coin_time = time.time()
-timeout_duration = 5.0  
+timeout_duration = 5.0
 is_coin_accumulation_mode = False
 is_flow_monitoring_mode = False
+
+# === BAGONG STATE PARA SA PAUSE/RESUME TOGGLE BUTTON ===
+# Ginagamit para hindi mag-trigger ang safety timeout habang sinasadyang
+# naka-pause ang user gamit ang physical button sa makina.
+is_pump_paused = False
+pause_started_at = 0.0
+paused_time_offset = 0.0  # kabuuang oras (segundo) na ginugol sa pag-pause sa kasalukuyang session
 ml_to_dispense = 0
 
 vendo_ref = None  # Gagamitin ng Firebase handler
+
 
 def save_config_to_local(name_id, name_public):
     global VENDO_ID, VENDO_NAME
@@ -38,6 +80,7 @@ def save_config_to_local(name_id, name_public):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
     print("💾 Configuration persistent data saved locally.")
+
 
 def load_local_config():
     if os.path.exists(CONFIG_FILE):
