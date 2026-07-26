@@ -5,6 +5,9 @@ import threading
 import sys
 import shared_state
 
+# Define MAX_CAPACITY Constant para madaling baguhin sa hinaharap
+MAX_WATER_CAPACITY = 20000  # 20 Liters = 20,000 mL
+
 def initialize_firebase_system():
     try:
         if not firebase_admin._apps:
@@ -18,30 +21,28 @@ def initialize_firebase_system():
         
         firebase_water_percent = shared_state.vendo_ref.child('water_level').get()
         if firebase_water_percent is not None:
-            shared_state.current_water_level = int((int(firebase_water_percent) / 100) * 16000)
+            # FIXED: Pinalitan ng MAX_WATER_CAPACITY (20000) mula 16000
+            shared_state.current_water_level = int((int(firebase_water_percent) / 100) * MAX_WATER_CAPACITY)
             print(f"📥 FIREBASE SYNC: Kasalukuyang laman sa cloud ay {firebase_water_percent}% ({shared_state.current_water_level}mL)")
         else:
-            shared_state.current_water_level = 16000
+            shared_state.current_water_level = MAX_WATER_CAPACITY
             shared_state.vendo_ref.child('water_level').set(100)
-            print(f"📥 FIREBASE INITIALIZED: Itinakda sa 100%")
+            print(f"📥 FIREBASE INITIALIZED: Itinakda sa 100% ({MAX_WATER_CAPACITY}mL)")
 
         def water_level_listener(event):
             if event.data is not None:
                 try:
                     val = int(event.data)
-                    if val == 100 and shared_state.current_water_level < 16000:
-                        shared_state.current_water_level = 16000
-                        print("\n🔄 [LIVE EVENT] ADMIN REFILL DETECTED: Internal water level successfully reset to 16000mL!")
+                    if val == 100 and shared_state.current_water_level < MAX_WATER_CAPACITY:
+                        shared_state.current_water_level = MAX_WATER_CAPACITY
+                        # FIXED: Inayos ang print statement mula 16000mL -> 20000mL
+                        print(f"\n🔄 [LIVE EVENT] ADMIN REFILL DETECTED: Internal water level successfully reset to {MAX_WATER_CAPACITY}mL!")
                 except Exception:
                     pass
                     
         shared_state.vendo_ref.child('water_level').listen(water_level_listener)
 
         # 🚀 MGA BACKGROUND THREADS
-        # NOTE: listen_for_admin_commands ay dito LANG dapat pinapaandar - HUWAG na
-        # itong i-start ulit sa hardware.py, dahil doble ang magiging listener kung
-        # gagawin (dalawang beses tatakbo ang bawat force_dispense trigger, sanhi ng
-        # sabay-sabay na pagsulat sa serial port).
         threading.Thread(target=start_heartbeat_loop, daemon=True).start()
         threading.Thread(target=listen_for_price_config, daemon=True).start()
         threading.Thread(target=listen_for_admin_commands, daemon=True).start()
@@ -66,7 +67,8 @@ def update_vending_status(status, water_level):
 def start_heartbeat_loop():
     while True:
         try:
-            water_percentage = round((shared_state.current_water_level / 16000) * 100)
+            # FIXED: Pinalitan ng MAX_WATER_CAPACITY (20000) mula 16000
+            water_percentage = round((shared_state.current_water_level / MAX_WATER_CAPACITY) * 100)
             update_vending_status("Connected", water_percentage)
         except Exception:
             pass
@@ -78,12 +80,6 @@ def listen_for_price_config():
             try:
                 shared_state.LIVE_ML_PER_PESO = int(event.data)
                 print(f"\n⚙️ CLOUD CONFIG UPDATE: new ratio for Admin: ₱1 = {shared_state.LIVE_ML_PER_PESO}mL")
-                # NOTE: Wala nang SET_RATIO command sa bagong time-based firmware -
-                # si Python na mismo ang direktang nagko-compute ng milliseconds gamit
-                # ang LIVE_ML_PER_PESO sa oras ng dispensing (tignan ang hardware.py),
-                # kaya wala nang kailangang i-sync na command papunta sa ESP32 dito.
-                # Tinanggal din ang dating direktang esp32.write() dito dahil
-                # nagdudulot ito ng race condition/garbled data (walang lock dati).
             except Exception as e:
                 print(f"⚠️ Error parsing price config: {e}")
 
@@ -102,9 +98,6 @@ def listen_for_admin_commands():
                     admin_test_ms = int(admin_pesos * 2500.0)
                     command_to_send = f"START_PUMP_MS:{admin_test_ms}\n"
 
-                    # === AYOS: Ginamit na ang serial_lock para hindi mag-collide sa
-                    # ibang thread (hardware_listener_loop, process_scanned_student)
-                    # na parehong gumagalaw sa serial port sa parehong sandali. ===
                     with shared_state.serial_lock:
                         shared_state.esp32.reset_input_buffer()
                         shared_state.esp32.write(command_to_send.encode())
