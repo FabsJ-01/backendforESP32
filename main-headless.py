@@ -2,30 +2,10 @@ import serial
 import serial.tools.list_ports
 import time
 import threading
+import sys
 from firebase_admin import db
 import shared_state
 import firebase_handler
-
-# ============================================
-# SETTINGS
-# ============================================
-FIREBASE_RETRY_DELAY = 5        # segundo sa pagitan ng bawat retry ng Firebase
-SAFETY_TIMEOUT_SECONDS = 90.0   # max na oras ng PUMPING (hindi kasama ang oras na naka-pause)
-DEFAULT_WATER_CAPACITY = 20000  # gagamitin kung walang MAX_WATER_CAPACITY sa firebase_handler
-
-
-def _water_capacity():
-    return getattr(firebase_handler, 'MAX_WATER_CAPACITY', DEFAULT_WATER_CAPACITY)
-
-
-def _set_status(text, color):
-    """Ligtas na pag-update ng GUI label (hindi mag-crash kung wala pang GUI)."""
-    try:
-        if shared_state.app_instance:
-            shared_state.app_instance.update_status_label(text, color)
-    except Exception:
-        pass
-
 
 # ============================================
 # PROCESS SCANNED STUDENT (QR / RFID LOGIC)
@@ -39,7 +19,8 @@ def process_scanned_student(scanned_uid):
     user_data = user_ref.get()
     if not user_data:
         print(f"❌ User {scanned_uid} not found.")
-        _set_status(f"❌ UID {scanned_uid} Not Found!", "#e74c3c")
+        if shared_state.app_instance:
+            shared_state.app_instance.update_status_label(f"❌ UID {scanned_uid} Not Found!", "#e74c3c")
         shared_state.active_student_uid = None
         return
 
@@ -47,7 +28,9 @@ def process_scanned_student(scanned_uid):
     user_ref.update({'coin_trigger': False, 'is_scanning': False, 'last_credits': 0})
     welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}!"
     print(welcome_msg)
-    _set_status(welcome_msg, "#3498db")
+
+    if shared_state.app_instance:
+        shared_state.app_instance.update_status_label(welcome_msg, "#3498db")
 
     shared_state.coin_amount = 0
     shared_state.last_coin_time = time.time()
@@ -93,22 +76,22 @@ def process_scanned_student(scanned_uid):
 
     if shared_state.coin_amount == 0:
         shared_state.active_student_uid = None
-        _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
+        if shared_state.app_instance:
+            shared_state.app_instance.update_status_label("⏳ Ready to Scan QR Code", "#2ecc71")
         return
 
     shared_state.ml_to_dispense = shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO
     user_ref.update({'last_credits': shared_state.coin_amount, 'is_scanning': True})
 
-    _set_status(
-        f"🪙 Final Total: ₱{shared_state.coin_amount} ({shared_state.ml_to_dispense:.0f}mL). Tap Dispense on Phone!",
-        "#f1c40f"
-    )
+    if shared_state.app_instance:
+        shared_state.app_instance.update_status_label(
+            f"🪙 Final Total: ₱{shared_state.coin_amount} ({shared_state.ml_to_dispense}mL). Tap Dispense on Phone!",
+            "#f1c40f"
+        )
 
     print("📱 Waiting for Mobile App 'Dispense' click...")
-
+    
     # 2. DISPENSE TRIGGER WAIT LOOP
-    dispense_started = False
-
     while True:
         try:
             if shared_state.vendo_ref.child('force_dispense').get() is True:
@@ -118,7 +101,7 @@ def process_scanned_student(scanned_uid):
 
             if current_status and current_status.get('coin_trigger') == True:
 
-                dispense_started = True
+                # RESET ACTUAL DISPENSED ML
                 shared_state.actual_dispensed_ml = 0
 
                 if shared_state.esp32:
@@ -128,40 +111,35 @@ def process_scanned_student(scanned_uid):
 
                     target_ml = float(shared_state.ml_to_dispense)
                     command_to_send = f"START_PUMP_ML:{target_ml:.1f}\n"
-
+                    
                     with shared_state.serial_lock:
                         shared_state.esp32.reset_input_buffer()
                         shared_state.esp32.write(command_to_send.encode())
-
+                        
                     print(f"📡 [SERIAL SENT]: {command_to_send.strip()} para sa {shared_state.ml_to_dispense}mL")
 
                 start_flow_time = time.time()
+                safety_timeout_seconds = 60.0
 
                 # 3. DISPENSING PROGRESS MONITORING LOOP
                 while shared_state.is_flow_monitoring_mode:
-                    # Ang oras na naka-pause ay HINDI binibilang sa safety timeout
-                    if not getattr(shared_state, 'is_pump_paused', False):
-                        active_time = (time.time() - start_flow_time) - getattr(shared_state, 'paused_time_offset', 0.0)
-                        if active_time > SAFETY_TIMEOUT_SECONDS:
-                            print(f"\n⚠️ [SAFETY TIMEOUT] {SAFETY_TIMEOUT_SECONDS:.0f}s max pumping time. Forcing stop.")
-                            if shared_state.esp32:
-                                try:
-                                    with shared_state.serial_lock:
-                                        shared_state.esp32.write(b'STOP_PUMP\n')
-                                except Exception as e:
-                                    print(f"⚠️ Serial Write Error (STOP_PUMP): {e}")
-                            
-                            # Hintayin sandali ang huling final response ng ESP32
-                            wait_start = time.time()
-                            while shared_state.is_flow_monitoring_mode and (time.time() - wait_start) < 3.0:
-                                time.sleep(0.05)
-                            shared_state.is_flow_monitoring_mode = False
-                            break
+                    total_elapsed_wall_time = time.time() - start_flow_time
+                    
+                    if total_elapsed_wall_time > safety_timeout_seconds:
+                        print("\n⚠️ [SAFETY TIMEOUT] 60s max limit reached. Forcing stop.")
+                        if shared_state.esp32:
+                            try:
+                                with shared_state.serial_lock:
+                                    shared_state.esp32.write(b'PAUSE_TIMEOUT_STOP\n')
+                            except Exception as e:
+                                print(f"⚠️ Serial Write Error (PAUSE_TIMEOUT_STOP): {e}")
+                        shared_state.is_flow_monitoring_mode = False
+                        break
 
                     time.sleep(0.05)
 
                 # ========================================================
-                # VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG
+                # 🎯 VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG
                 # ========================================================
                 poured_ml = getattr(shared_state, 'actual_dispensed_ml', 0)
                 poured_ml = min(poured_ml, shared_state.ml_to_dispense)
@@ -171,15 +149,15 @@ def process_scanned_student(scanned_uid):
                 if poured_ml <= 0:
                     print("⚠️ 0 mL dispensed. Skipping Firebase intake update and logs.")
                     user_ref.update({
-                        'is_scanning': False,
-                        'coin_trigger': False,
+                        'is_scanning': False, 
+                        'coin_trigger': False, 
                         'last_credits': 0
                     })
                     break
 
                 # Update gallon water level
                 shared_state.current_water_level = max(0, shared_state.current_water_level - poured_ml)
-                water_percentage = round((shared_state.current_water_level / _water_capacity()) * 100)
+                water_percentage = round((shared_state.current_water_level / firebase_handler.MAX_WATER_CAPACITY) * 100)
 
                 try:
                     shared_state.vendo_ref.update({'water_level': water_percentage})
@@ -191,10 +169,10 @@ def process_scanned_student(scanned_uid):
                 finish_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
                 user_ref.update({
-                    'intake': new_intake,
+                    'intake': new_intake, 
                     'last_drink_time': finish_time,
-                    'is_scanning': False,
-                    'coin_trigger': False,
+                    'is_scanning': False, 
+                    'coin_trigger': False, 
                     'last_credits': 0
                 })
 
@@ -210,26 +188,19 @@ def process_scanned_student(scanned_uid):
                     'vendo_id': shared_state.VENDO_ID,
                     'amount_ml': poured_ml,
                     'timestamp': finish_time,
-                    'status': "Success" if is_full else "Partial (Paused/Timeout)"
+                    'status': "Success" if is_full else "Partial (Paused Timeout)"
                 })
                 break
 
         except Exception as e:
             print(f"⚠️ Error inside active listen loop: {e}")
-            if dispense_started:
-                shared_state.is_flow_monitoring_mode = False
-                try:
-                    user_ref.update({'is_scanning': False, 'coin_trigger': False, 'last_credits': 0})
-                except Exception:
-                    pass
-                break
 
         time.sleep(0.4)
 
     shared_state.active_student_uid = None
     print("🔒 Kiosk lock released. Ready for next transaction.")
-    _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
-
+    if shared_state.app_instance:
+        shared_state.app_instance.update_status_label("⏳ Ready to Scan QR Code", "#2ecc71")
 
 # ============================================
 # HARDWARE CONNECTION & BACKGROUND LISTENER
@@ -260,40 +231,26 @@ def connect_to_esp32(max_retries=3, retry_delay=2):
     return False
 
 
-def _esp32_watchdog():
-    """Kapag na-unplug/nawala ang ESP32, susubukan nitong kumonekta ulit."""
-    while True:
-        if shared_state.esp32 is None:
-            print("⚠️ ESP32 Disconnected. Attempting reconnection...")
-            connect_to_esp32(max_retries=1, retry_delay=1)
-        time.sleep(3.0)
+def start_h2o_core_system():
+    print("\n--- H2O HUB: SMART SYSTEM RUNNING ---")
 
+    connect_to_esp32()
 
-def _start_hardware_listener():
+    if not firebase_handler.initialize_firebase_system():
+        print("❌ Firebase Initialization Failed.")
+        return False
+
     def hardware_listener_loop():
-        consecutive_errors = 0
-
         while True:
             if shared_state.esp32:
                 hardware_data = None
-
+                
                 try:
                     with shared_state.serial_lock:
                         if shared_state.esp32.in_waiting > 0:
                             hardware_data = shared_state.esp32.readline().decode('utf-8', errors='ignore').strip()
-                    consecutive_errors = 0
                 except Exception as read_err:
-                    consecutive_errors += 1
                     print(f"⚠️ Serial Reading Error: {read_err}")
-                    if consecutive_errors >= 5:
-                        try:
-                            shared_state.esp32.close()
-                        except Exception:
-                            pass
-                        shared_state.esp32 = None
-                        consecutive_errors = 0
-                    time.sleep(0.2)
-                    continue
 
                 if not hardware_data:
                     time.sleep(0.02)
@@ -301,25 +258,13 @@ def _start_hardware_listener():
 
                 print(f"📡 [RAW HARDWARE DATA]: {hardware_data}")
 
-                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER (DAGDAG)
-                if hardware_data.startswith("TEST_PULSES_RESULT:"):
-                    try:
-                        total_pulses = int(hardware_data.split(":")[1].strip())
-                        print(f"📥 [SERIAL RECEIVED] 5-Second Test Pulses: {total_pulses}")
-                        if hasattr(shared_state, 'vendo_ref') and shared_state.vendo_ref:
-                            shared_state.vendo_ref.update({
-                                'last_test_pulses': total_pulses
-                            })
-                            print("✅ last_test_pulses successfully updated in Firebase!")
-                    except Exception as e:
-                        print(f"⚠️ Error parsing test pulses result: {e}")
-
                 # 1. QR / CARD UID SCAN HANDLER
-                elif hardware_data.startswith("UID_"):
+                if hardware_data.startswith("UID_"):
                     uid = hardware_data.replace("UID_", "").strip()
                     if shared_state.active_student_uid is not None:
                         print(f"⚠️ KIOSK BUSY: Tinanggihan si {uid}.")
-                        _set_status("⚠️ System Busy!", "#e74c3c")
+                        if shared_state.app_instance:
+                            shared_state.app_instance.update_status_label("⚠️ System Busy!", "#e74c3c")
                         continue
                     threading.Thread(target=process_scanned_student, args=(uid,), daemon=True).start()
 
@@ -327,7 +272,7 @@ def _start_hardware_listener():
                 elif shared_state.is_coin_accumulation_mode and ("_PESO" in hardware_data or "_PESOS" in hardware_data):
                     shared_state.last_coin_time = time.time()
                     coin_detected = 0
-
+                    
                     if "1_PESO" in hardware_data:
                         coin_detected = 1
                     elif "5_PESOS" in hardware_data:
@@ -340,35 +285,39 @@ def _start_hardware_listener():
                     if coin_detected > 0:
                         shared_state.coin_amount += coin_detected
                         print(f"\n🪙 Coin Added: ₱{coin_detected} | Total Accumulated: ₱{shared_state.coin_amount}")
-                        _set_status(
-                            f"🪙 Total Coins: ₱{shared_state.coin_amount} ({shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO:.0f}mL).",
-                            "#f1c40f"
-                        )
 
-                # 3. PHYSICAL BUTTON PAUSE/RESUME HANDLER
+                        if shared_state.app_instance:
+                            shared_state.app_instance.update_status_label(
+                                f"🪙 Total Coins: ₱{shared_state.coin_amount} ({shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO}mL).",
+                                "#f1c40f"
+                            )
+
+                # 3. BUTTON PAUSE/RESUME HANDLER
                 elif hardware_data == "PUMP_PAUSED":
                     shared_state.is_pump_paused = True
                     shared_state.pause_started_at = time.time()
                     print("\n⏸️ Pump paused via physical button.")
-                    _set_status("⏸️ Dispensing Paused (Pindutin ang button sa Kiosk para ituloy)", "#F59E0B")
+                    if shared_state.app_instance:
+                        shared_state.app_instance.update_status_label("⏸️ Paused - Pindutin ang button sa kiosk para ituloy", "#F59E0B")
 
                 elif hardware_data == "PUMP_RESUMED":
-                    if getattr(shared_state, 'is_pump_paused', False):
-                        pause_duration = time.time() - getattr(shared_state, 'pause_started_at', time.time())
-                        shared_state.paused_time_offset = getattr(shared_state, 'paused_time_offset', 0.0) + pause_duration
-                    
+                    if shared_state.is_pump_paused:
+                        shared_state.paused_time_offset += time.time() - shared_state.pause_started_at
                     shared_state.is_pump_paused = False
                     print("\n▶️ Pump resumed via physical button.")
-                    _set_status(f"💧 Dispensing Water... ({shared_state.ml_to_dispense:.0f}mL Target)", "#059669")
+                    if shared_state.app_instance:
+                        shared_state.app_instance.update_status_label(
+                            f"💧 Dispensing: {shared_state.ml_to_dispense}mL target", "#e67e22"
+                        )
 
                 # 4. DISPENSING PROGRESS & FINAL VOLUME RECEIVER
                 elif shared_state.is_flow_monitoring_mode:
-
+                    
                     if hardware_data.startswith("DISPENSED_FINAL_ML:"):
                         try:
                             final_ml_val = float(hardware_data.split(":")[1].strip())
                             shared_state.actual_dispensed_ml = int(round(final_ml_val))
-                            print(f"\n⏱️️ Final Volume Received: {final_ml_val:.1f} mL")
+                            print(f"\n⏱️ Final Volume Received: {final_ml_val:.1f} mL")
                         except Exception as e:
                             print(f"⚠️ Error parsing final ml: {e}")
 
@@ -376,19 +325,17 @@ def _start_hardware_listener():
                         try:
                             progress_part = hardware_data.split(":")[1].strip()
                             dispensed_ml_str, target_ml_str = progress_part.split("/")
-
+                            
                             dispensed_val = float(dispensed_ml_str)
                             target_val = float(target_ml_str)
 
                             shared_state.actual_dispensed_ml = int(round(dispensed_val))
 
                             percent = min(100, round((dispensed_val / max(1.0, target_val)) * 100))
-                            
-                            # Pag-update ng status label batay sa kung naka-pause o aktibo
-                            if not getattr(shared_state, 'is_pump_paused', False):
-                                status_txt = f"💧 Dispensing: {percent}% ({shared_state.actual_dispensed_ml}mL / {shared_state.ml_to_dispense:.0f}mL)"
-                                print(f"\r{status_txt}", end="")
-                                _set_status(status_txt, "#059669")
+                            status_txt = f"💧 Dispensing: {percent}% ({shared_state.actual_dispensed_ml}mL / {shared_state.ml_to_dispense}mL)"
+                            print(f"\r{status_txt}", end="")
+                            if shared_state.app_instance:
+                                shared_state.app_instance.update_status_label(status_txt, "#e67e22")
                         except (IndexError, ValueError):
                             pass
 
@@ -399,34 +346,29 @@ def _start_hardware_listener():
 
             time.sleep(0.02)
 
+    # Simulan ang background hardware listener thread
     threading.Thread(target=hardware_listener_loop, daemon=True).start()
-
-
-def _startup_worker():
-    """
-    Tumatakbo sa background para hindi ma-freeze ang GUI.
-    """
-    time.sleep(1.5)
-    _set_status("⏳ Connecting to cloud...", "#F59E0B")
-
-    connect_to_esp32()
-    threading.Thread(target=_esp32_watchdog, daemon=True).start()
-
-    attempt = 0
-    while True:
-        attempt += 1
-        if firebase_handler.initialize_firebase_system():
-            break
-        print(f"❌ Firebase Initialization Failed (attempt {attempt}). Retrying in {FIREBASE_RETRY_DELAY}s...")
-        _set_status("⚠️ No cloud connection - retrying...", "#e74c3c")
-        time.sleep(FIREBASE_RETRY_DELAY)
-
-    _start_hardware_listener()
-    print("🚀 Vending Machine Service Active & Listening...")
-    _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
-
-
-def start_h2o_core_system():
-    print("\n--- H2O HUB: SMART SYSTEM RUNNING ---")
-    threading.Thread(target=_startup_worker, daemon=True).start()
     return True
+
+# ============================================
+# MAIN ENTRY POINT & SYSTEMD INFINITE LOOP
+# ============================================
+if __name__ == "__main__":
+    start_h2o_core_system()
+    print("🚀 Vending Machine Service Active & Listening...")
+
+    try:
+        # Ang infinite loop na ito ang magpapanatili sa service na ALIVE (active running)
+        while True:
+            # Reconnection safety check kung sakaling ma-unplug ang ESP32 habang tumatakbo
+            if shared_state.esp32 is None:
+                print("⚠️ ESP32 Disconnected. Attempting reconnection...")
+                connect_to_esp32(max_retries=1, retry_delay=1)
+
+            time.sleep(1.0)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Pinatigil ang H2O HUB Core System.")
+        if shared_state.esp32 and shared_state.esp32.is_open:
+            shared_state.esp32.close()
+        sys.exit(0)

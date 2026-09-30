@@ -1,6 +1,16 @@
 import sys 
 import os
+import socket
 import threading
+
+# --- 1. SINGLE INSTANCE LOCK (PIGILAN ANG PAGDODOBLE NG APP) ---
+try:
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lock_socket.bind(('127.0.0.1', 65432))
+except socket.error:
+    print("⚠️ Naka-run na ang H2O HUB Kiosk App! Isasara ang bagong instance.")
+    sys.exit(0)
+
 import customtkinter as ctk
 import shared_state
 import hardware
@@ -16,12 +26,15 @@ class H2OHubKioskSetup(ctk.CTk):
 
         self.title("H2O HUB - Smart Setup Console")
         
+        # Protocol handler para sa pag-close ng app
+        self.protocol("WM_DELETE_WINDOW", self.on_closing_app)
+        
         # Pwersahang White ang Root Window Background
         self.configure(fg_color="#FFFFFF")
         
         # --- AUTOMATIC FULLSCREEN AT WINDOW PRIORITY SETUP ---
         self.attributes("-fullscreen", True)
-        self.attributes("-topmost", True)  # Pwersahing laging nasa ibabaw ng Windows Desktop para hindi mawalan ng focus
+        self.attributes("-topmost", True)  # Pwersahing laging nasa ibabaw para hindi mawalan ng focus
         
         # Fallback bindings para makalabas sa fullscreen kung kailangan ng admin (Esc key)
         self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
@@ -45,6 +58,12 @@ class H2OHubKioskSetup(ctk.CTk):
             widget.destroy()
 
     def show_welcome_screen(self):
+        # Siguraduhing tatanggalin muna ang anumang FocusIn bindings kapag bumalik sa Welcome/Setup Screen
+        try:
+            self.unbind("<FocusIn>")
+        except Exception:
+            pass
+
         self.clear_frame()
         
         # Pag-setup ng Responsive Grid Alignment sa Loob ng Main Container
@@ -52,7 +71,6 @@ class H2OHubKioskSetup(ctk.CTk):
         for r in range(6):
             self.main_frame.grid_rowconfigure(r, weight=1)
         
-        # Mga Label at Inputs na Inibaygay ang kulay sa White/Light Interface
         title_label = ctk.CTkLabel(self.main_frame, text="H2O HUB KIOSK SETUP", font=ctk.CTkFont(size=36, weight="bold"), text_color="#1E293B")
         title_label.grid(row=0, column=0, pady=(40, 20), sticky="s")
 
@@ -70,8 +88,6 @@ class H2OHubKioskSetup(ctk.CTk):
         self.save_btn.configure(command=self.save_and_deploy)
         self.save_btn.grid(row=5, column=0, pady=(30, 40), sticky="n")
 
-        # Alisin ang mga nakaraang event hooks para sa welcome screen
-        self.unbind("<FocusIn>")
         self.after(300, lambda: self.vendo_name_entry.focus_set())
 
     def save_and_deploy(self):
@@ -114,19 +130,13 @@ class H2OHubKioskSetup(ctk.CTk):
         reset_btn = ctk.CTkButton(self.main_frame, text="⚙️ RESET KIOSK CONFIG", width=250, height=45, fg_color="#EF4444", hover_color="#DC2626", text_color="#FFFFFF", font=ctk.CTkFont(size=14, weight="bold"), corner_radius=10, command=self.confirm_hardware_reset)
         reset_btn.grid(row=5, column=0, pady=(20, 40), sticky="n")
         
-        # --- MGA SUPREME FOCUS AUTOMATION ENGAGEMENTS ---
+        # --- LIGTAS NA FOCUS AUTOMATION ---
         def force_kiosk_focus(event=None):
-            # Tinitiyak na ang event source ay ang mismong root application window upang maiwasan ang loop
-            if event is None or event.widget == self:
+            if hasattr(self, 'sim_entry') and self.sim_entry.winfo_exists():
                 self.sim_entry.focus_set()
-                self.sim_entry.focus()
                 
-        # 1. Tuwing magkakaroon ng Focus/Click kahit saan sa Screen ang User o Windows OS, ibalik agad sa text box ang cursor
         self.bind("<FocusIn>", force_kiosk_focus)
-        
-        # 2. Pwersahang pasabugin ang focus pagkalipas ng ilang millisecond mula sa startup
         self.after(200, force_kiosk_focus)
-        self.after(500, force_kiosk_focus)
         
         hardware.start_h2o_core_system()
 
@@ -144,10 +154,22 @@ class H2OHubKioskSetup(ctk.CTk):
 
     def update_status_label(self, text, color):
         def adjust_ui():
-            print(f"🖥️ [GUI UPDATE ATTEMPT]: {text}")  # DEBUG: para malaman kung tinatawag talaga ito
-            bg_color = "#FCE8E6" if color in ["#e74c3c", "#EF4444", "#DC2626"] else ("#FEF3C7" if color in ["#f1c40f", "#F59E0B"] else "#E6F4EA")
+            c_upper = str(color).upper()
+            # Red/Error States
+            if c_upper in ["#E74C3C", "#EF4444", "#DC2626"]:
+                bg_color = "#FCE8E6"
+            # Warning / Yellow / Orange States
+            elif c_upper in ["#F1C40F", "#F59E0B", "#E67E22"]:
+                bg_color = "#FEF3C7"
+            # Blue Info States
+            elif c_upper in ["#3498DB", "#3B82F6"]:
+                bg_color = "#E0F2FE"
+            # Green Ready/Active States
+            else:
+                bg_color = "#E6F4EA"
+
             self.system_status_label.configure(text=text, text_color=color, fg_color=bg_color)
-            self.system_status_label.update_idletasks()  # pilitin ang redraw
+            self.system_status_label.update_idletasks()
 
         self.after(0, adjust_ui)
 
@@ -212,7 +234,7 @@ if __name__ == "__main__":
         if shared_state.esp32: 
             try: 
                 shared_state.esp32.write(b'STOP_PUMP\n')
-            except Exception: 
+            except Exception:   
                 pass
         print("System Shutting Down. Bye!")
         os._exit(0)

@@ -5,7 +5,6 @@ import threading
 import sys
 import shared_state
 
-# Define MAX_CAPACITY Constant para madaling baguhin sa hinaharap
 MAX_WATER_CAPACITY = 20000  # 20 Liters = 20,000 mL
 
 def initialize_firebase_system():
@@ -19,9 +18,9 @@ def initialize_firebase_system():
         print(f"🔗 Firebase targeting active node: vendos/{shared_state.VENDO_ID} ({shared_state.VENDO_NAME})")
         shared_state.vendo_ref = db.reference(f'vendos/{shared_state.VENDO_ID}')
         
+        # Sync Initial Water Level
         firebase_water_percent = shared_state.vendo_ref.child('water_level').get()
         if firebase_water_percent is not None:
-            # FIXED: Pinalitan ng MAX_WATER_CAPACITY (20000) mula 16000
             shared_state.current_water_level = int((int(firebase_water_percent) / 100) * MAX_WATER_CAPACITY)
             print(f"📥 FIREBASE SYNC: Kasalukuyang laman sa cloud ay {firebase_water_percent}% ({shared_state.current_water_level}mL)")
         else:
@@ -35,18 +34,18 @@ def initialize_firebase_system():
                     val = int(event.data)
                     if val == 100 and shared_state.current_water_level < MAX_WATER_CAPACITY:
                         shared_state.current_water_level = MAX_WATER_CAPACITY
-                        # FIXED: Inayos ang print statement mula 16000mL -> 20000mL
                         print(f"\n🔄 [LIVE EVENT] ADMIN REFILL DETECTED: Internal water level successfully reset to {MAX_WATER_CAPACITY}mL!")
                 except Exception:
                     pass
                     
         shared_state.vendo_ref.child('water_level').listen(water_level_listener)
 
-        # 🚀 MGA BACKGROUND THREADS
+        # 🚀 BACKGROUND THREADS
         threading.Thread(target=start_heartbeat_loop, daemon=True).start()
         threading.Thread(target=listen_for_price_config, daemon=True).start()
+        threading.Thread(target=listen_for_flow_calibration, daemon=True).start()
         threading.Thread(target=listen_for_admin_commands, daemon=True).start()
-        
+        threading.Thread(target=listen_for_test_dispense, daemon=True).start()
         return True
     except Exception as e:
         print(f"❌ Firebase Connection Error: {e}")
@@ -67,7 +66,6 @@ def update_vending_status(status, water_level):
 def start_heartbeat_loop():
     while True:
         try:
-            # FIXED: Pinalitan ng MAX_WATER_CAPACITY (20000) mula 16000
             water_percentage = round((shared_state.current_water_level / MAX_WATER_CAPACITY) * 100)
             update_vending_status("Connected", water_percentage)
         except Exception:
@@ -85,6 +83,26 @@ def listen_for_price_config():
 
     shared_state.vendo_ref.child('settings/ml_per_peso').listen(price_listener)
 
+def listen_for_flow_calibration():
+    print("🌊 Flow Sensor Calibration Listener Active...")
+    def calibration_listener(event):
+        if event.data is not None:
+            try:
+                pulses_val = float(event.data)
+                print(f"\n⚙️ [FLOW CALIBRATION] New pulse calibration received: {pulses_val} pulses/mL")
+                
+                if shared_state.esp32:
+                    cmd = f"SET_PULSES_PER_ML:{pulses_val:.2f}\n"
+                    with shared_state.serial_lock:
+                        shared_state.esp32.write(cmd.encode())
+                    print(f"📡 [SERIAL SENT - CALIBRATION]: {cmd.strip()}")
+                else:
+                    print("⚠️ ESP32 offline, calibration saved in cloud but not synced to hardware yet.")
+            except Exception as e:
+                print(f"⚠️ Error parsing flow calibration: {e}")
+
+    shared_state.vendo_ref.child('settings/pulses_per_ml').listen(calibration_listener)
+
 def listen_for_admin_commands():
     print("📡 Admin Command Listener Active (Watching for Force Dispense)...")
     
@@ -95,8 +113,8 @@ def listen_for_admin_commands():
                 
                 if shared_state.esp32:
                     admin_pesos = 2.5
-                    admin_test_ms = int(admin_pesos * 2500.0)
-                    command_to_send = f"START_PUMP_MS:{admin_test_ms}\n"
+                    target_ml = float(admin_pesos * shared_state.LIVE_ML_PER_PESO)
+                    command_to_send = f"START_PUMP_ML:{target_ml:.1f}\n"
 
                     with shared_state.serial_lock:
                         shared_state.esp32.reset_input_buffer()
@@ -107,12 +125,7 @@ def listen_for_admin_commands():
                     if hasattr(shared_state, 'app_instance') and shared_state.app_instance:
                         shared_state.app_instance.update_status_label("🚨 Admin Force Dispense Active!", "#e67e22")
                     
-                    simulated_ml = admin_pesos * shared_state.LIVE_ML_PER_PESO
-                    shared_state.current_water_level = max(0, shared_state.current_water_level - simulated_ml)
-                    
-                    shared_state.is_flow_monitoring_mode = True
-                    time.sleep(admin_test_ms / 1000.0)
-                    shared_state.is_flow_monitoring_mode = False
+                    shared_state.current_water_level = max(0, shared_state.current_water_level - int(target_ml))
                 else:
                     print("❌ Cannot dispense: ESP32 connection is offline!")
                 
@@ -123,8 +136,47 @@ def listen_for_admin_commands():
                         shared_state.app_instance.update_status_label("⏳ Ready to Scan QR Code", "#2ecc71")
                 except Exception as fb_err:
                     print(f"⚠️ Error resetting force_dispense flag: {fb_err}")
-            
             else:
                 print("\n🚨 [WEB APP COMMAND] Force Dispense detected! Transaction active, passing control to hardware.py loop...")
 
     shared_state.vendo_ref.child('force_dispense').listen(listener)
+
+# 🧪 TEST DISPENSE LISTENER: Sinusuportahan ang 'test_dispense' at 'test_dispense_ms'
+def listen_for_test_dispense():
+    print("🧪 Test Dispense Listener Active (Watching for 5-Second Test)...")
+    
+    def test_listener(event):
+        # Huwag pansinin kapag nireset pabalik sa False / 0 / None
+        if event.data is None or event.data is False or event.data == 0:
+            return
+
+        # Tumatanggap ng True, "TEST_5s", o anumang millisecond value (e.g. 5000)
+        if event.data is True or event.data == "TEST_5s" or str(event.data) == "5000":
+            print("\n🧪 [WEB APP COMMAND] 5-Second Test Dispense Triggered!")
+            
+            if hasattr(shared_state, 'esp32') and shared_state.esp32:
+                command_to_send = "START_TEST_5S\n"
+
+                with shared_state.serial_lock:
+                    shared_state.esp32.reset_input_buffer()
+                    shared_state.esp32.write(command_to_send.encode())
+
+                print(f"📡 [SERIAL SENT - TEST DISPENSE]: {command_to_send.strip()}")
+            else:
+                print("❌ Cannot run test: ESP32 connection is offline!")
+            
+            # 🚀 IMPORTANT: I-reset ang PAREHONG flags sa Firebase para pwedeng pindutin ulit!
+            try:
+                shared_state.vendo_ref.update({
+                    'test_dispense': False,
+                    'test_dispense_ms': 0
+                })
+                print("✅ Test dispense flags successfully reset to False/0 in Firebase.")
+            except Exception as fb_err:
+                print(f"⚠️ Error resetting test dispense flags: {fb_err}")
+
+    # Pakinggan ang 'test_dispense' node
+    shared_state.vendo_ref.child('test_dispense').listen(test_listener)
+    
+    # Backup listener para sa 'test_dispense_ms' node (kung ito ang gamit sa Flutter)
+    shared_state.vendo_ref.child('test_dispense_ms').listen(test_listener)
