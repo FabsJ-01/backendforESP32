@@ -1,1 +1,4 @@
 key.json
+serviceAccountKey.json
+*.json
+!config.json

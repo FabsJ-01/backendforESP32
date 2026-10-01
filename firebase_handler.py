@@ -10,7 +10,7 @@ MAX_WATER_CAPACITY = 20000  # 20 Liters = 20,000 mL
 def initialize_firebase_system():
     try:
         if not firebase_admin._apps:
-            cred = credentials.Certificate("key.json")
+            cred = credentials.Certificate("serviceAccountKey.json")
             firebase_admin.initialize_app(cred, {
                 'databaseURL': 'https://h2o-project-e83d9-default-rtdb.firebaseio.com'
             })
