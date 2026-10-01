@@ -2,6 +2,7 @@ import sys
 import os
 import socket
 import threading
+import time
 
 # --- 1. SINGLE INSTANCE LOCK (PIGILAN ANG PAGDODOBLE NG APP) ---
 try:
@@ -15,7 +16,16 @@ import customtkinter as ctk
 import shared_state
 import hardware
 
-# --- PINALITAN ANG THEME AT APPEARANCE MODE PARA SA WHITE BACKGROUND ---
+# --- HELPER FUNCTION PARA SA AUTOMATIC TIMESTAMP ---
+def get_last_modified_time():
+    """Awtomatikong kukunin ang last saved date/time ng main.py"""
+    try:
+        mod_time = os.path.getmtime(__file__)
+        return time.strftime("%Y-%m-%d %I:%M %p", time.localtime(mod_time))
+    except Exception:
+        return "Unknown"
+
+# --- THEME AT APPEARANCE MODE ---
 ctk.set_appearance_mode("Light")  
 ctk.set_default_color_theme("blue")
 
@@ -34,16 +44,15 @@ class H2OHubKioskSetup(ctk.CTk):
         
         # --- AUTOMATIC FULLSCREEN AT WINDOW PRIORITY SETUP ---
         self.attributes("-fullscreen", True)
-        self.attributes("-topmost", True)  # Pwersahing laging nasa ibabaw para hindi mawalan ng focus
+        self.attributes("-topmost", True)
         
-        # Fallback bindings para makalabas sa fullscreen kung kailangan ng admin (Esc key)
+        # Fallback bindings para makalabas sa fullscreen (Esc key)
         self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
 
         # --- RESPONSIVE STRUCTURAL LAYOUT LOGIC ---
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Ang Main Frame ay ginawang parang Card Panel na lumulutang sa gitna ng Screen
         self.main_frame = ctk.CTkFrame(self, fg_color="#F5F6FA", corner_radius=20, border_width=1, border_color="#E2E8F0")
         self.main_frame.grid(row=0, column=0, padx=60, pady=60, sticky="nsew")
 
@@ -58,7 +67,6 @@ class H2OHubKioskSetup(ctk.CTk):
             widget.destroy()
 
     def show_welcome_screen(self):
-        # Siguraduhing tatanggalin muna ang anumang FocusIn bindings kapag bumalik sa Welcome/Setup Screen
         try:
             self.unbind("<FocusIn>")
         except Exception:
@@ -66,13 +74,12 @@ class H2OHubKioskSetup(ctk.CTk):
 
         self.clear_frame()
         
-        # Pag-setup ng Responsive Grid Alignment sa Loob ng Main Container
         self.main_frame.grid_columnconfigure(0, weight=1)
-        for r in range(6):
+        for r in range(7):  # Ginawang 7 rows para magkasya ang timestamp
             self.main_frame.grid_rowconfigure(r, weight=1)
         
         title_label = ctk.CTkLabel(self.main_frame, text="H2O HUB KIOSK SETUP", font=ctk.CTkFont(size=36, weight="bold"), text_color="#1E293B")
-        title_label.grid(row=0, column=0, pady=(40, 20), sticky="s")
+        title_label.grid(row=0, column=0, pady=(30, 10), sticky="s")
 
         ctk.CTkLabel(self.main_frame, text="Vendo Public Name:", font=ctk.CTkFont(size=16, weight="bold"), text_color="#475569").grid(row=1, column=0, pady=(10, 2), sticky="s")
         self.vendo_name_entry = ctk.CTkEntry(self.main_frame, placeholder_text="Hal. Campus Ground Floor Vendo", width=500, height=45, font=ctk.CTkFont(size=14), fg_color="#FFFFFF", text_color="#0F172A", border_color="#CBD5E1")
@@ -86,7 +93,12 @@ class H2OHubKioskSetup(ctk.CTk):
 
         self.save_btn = ctk.CTkButton(self.main_frame, text="🚀 SAVE & ACTIVATE KIOSK", width=350, height=60, fg_color="#10B981", hover_color="#059669", font=ctk.CTkFont(size=16, weight="bold"), text_color="#FFFFFF", corner_radius=12)
         self.save_btn.configure(command=self.save_and_deploy)
-        self.save_btn.grid(row=5, column=0, pady=(30, 40), sticky="n")
+        self.save_btn.grid(row=5, column=0, pady=(20, 10), sticky="n")
+
+        # --- GUI TIMESTAMP LABEL (SETUP SCREEN) ---
+        build_info = f"🛠️ System Build: {get_last_modified_time()} | v1.0.2 (Arduino Ready)"
+        version_lbl = ctk.CTkLabel(self.main_frame, text=build_info, font=ctk.CTkFont(size=12), text_color="#94A3B8")
+        version_lbl.grid(row=6, column=0, pady=(5, 15), sticky="s")
 
         self.after(300, lambda: self.vendo_name_entry.focus_set())
 
@@ -110,26 +122,31 @@ class H2OHubKioskSetup(ctk.CTk):
         self.clear_frame()
         
         self.main_frame.grid_columnconfigure(0, weight=1)
-        for r in range(6):
+        for r in range(7):  # Ginawang 7 rows para magkasya ang timestamp
             self.main_frame.grid_rowconfigure(r, weight=1)
 
         status_lbl = ctk.CTkLabel(self.main_frame, text="🚀 VENDO LIVE & ACTIVE", font=ctk.CTkFont(size=36, weight="bold"), text_color="#059669")
-        status_lbl.grid(row=0, column=0, pady=(40, 5), sticky="s")
+        status_lbl.grid(row=0, column=0, pady=(30, 5), sticky="s")
 
         info_lbl = ctk.CTkLabel(self.main_frame, text=f"ID: {shared_state.VENDO_ID} | Name: {shared_state.VENDO_NAME}", font=ctk.CTkFont(size=18, weight="bold"), text_color="#475569")
         info_lbl.grid(row=1, column=0, pady=5, sticky="n")
 
-        self.system_status_label = ctk.CTkLabel(self.main_frame, text="⏳ Ready to Scan QR Code", font=ctk.CTkFont(size=24, weight="bold"), text_color="#059669", fg_color="#E6F4EA", width=750, height=140, corner_radius=16)
-        self.system_status_label.grid(row=2, column=0, pady=30, sticky="nsew", padx=40)
+        self.system_status_label = ctk.CTkLabel(self.main_frame, text="⏳ Ready to Scan QR Code", font=ctk.CTkFont(size=24, weight="bold"), text_color="#059669", fg_color="#E6F4EA", width=750, height=130, corner_radius=16)
+        self.system_status_label.grid(row=2, column=0, pady=20, sticky="nsew", padx=40)
 
-        ctk.CTkLabel(self.main_frame, text="⌨️ Kiosk Test Input (Simulate QR Scan UID):", font=ctk.CTkFont(size=15, weight="bold"), text_color="#64748B").grid(row=3, column=0, pady=(15, 2), sticky="s")
+        ctk.CTkLabel(self.main_frame, text="⌨️ Kiosk Test Input (Simulate QR Scan UID):", font=ctk.CTkFont(size=15, weight="bold"), text_color="#64748B").grid(row=3, column=0, pady=(10, 2), sticky="s")
         self.sim_entry = ctk.CTkEntry(self.main_frame, placeholder_text="Hal. user_001 (Pindutin ang Enter)", width=500, height=45, font=ctk.CTkFont(size=14), fg_color="#FFFFFF", text_color="#0F172A", border_color="#CBD5E1")
         self.sim_entry.grid(row=4, column=0, pady=5, sticky="n")
         self.sim_entry.bind("<Return>", lambda event: self.trigger_simulated_scan())
 
-        reset_btn = ctk.CTkButton(self.main_frame, text="⚙️ RESET KIOSK CONFIG", width=250, height=45, fg_color="#EF4444", hover_color="#DC2626", text_color="#FFFFFF", font=ctk.CTkFont(size=14, weight="bold"), corner_radius=10, command=self.confirm_hardware_reset)
-        reset_btn.grid(row=5, column=0, pady=(20, 40), sticky="n")
+        reset_btn = ctk.CTkButton(self.main_frame, text="⚙️ RESET KIOSK CONFIG", width=250, height=40, fg_color="#EF4444", hover_color="#DC2626", text_color="#FFFFFF", font=ctk.CTkFont(size=14, weight="bold"), corner_radius=10, command=self.confirm_hardware_reset)
+        reset_btn.grid(row=5, column=0, pady=(15, 5), sticky="n")
         
+        # --- GUI TIMESTAMP LABEL (LIVE RUNNING SCREEN) ---
+        build_info = f"🟢 Live App Build: {get_last_modified_time()} | Config Loaded"
+        live_version_lbl = ctk.CTkLabel(self.main_frame, text=build_info, font=ctk.CTkFont(size=12, weight="bold"), text_color="#64748B")
+        live_version_lbl.grid(row=6, column=0, pady=(5, 15), sticky="s")
+
         # --- LIGTAS NA FOCUS AUTOMATION ---
         def force_kiosk_focus(event=None):
             if hasattr(self, 'sim_entry') and self.sim_entry.winfo_exists():
@@ -155,16 +172,12 @@ class H2OHubKioskSetup(ctk.CTk):
     def update_status_label(self, text, color):
         def adjust_ui():
             c_upper = str(color).upper()
-            # Red/Error States
             if c_upper in ["#E74C3C", "#EF4444", "#DC2626"]:
                 bg_color = "#FCE8E6"
-            # Warning / Yellow / Orange States
             elif c_upper in ["#F1C40F", "#F59E0B", "#E67E22"]:
                 bg_color = "#FEF3C7"
-            # Blue Info States
             elif c_upper in ["#3498DB", "#3B82F6"]:
                 bg_color = "#E0F2FE"
-            # Green Ready/Active States
             else:
                 bg_color = "#E6F4EA"
 
@@ -220,10 +233,11 @@ class H2OHubKioskSetup(ctk.CTk):
         os._exit(0) 
 
 if __name__ == "__main__":
+    print("\n==================================================")
+    print("🚀 STARTING H2O HUB KIOSK GUI")
+    print(f"   BUILD TIMESTAMP: {get_last_modified_time()}")
+    print("==================================================\n")
 
-    print("\n==============================================")
-    print("🚀 STARTING H2O HUB KIOSK (BUILD: 2 OCT 2026 - ARDUINO UNO READY)")
-    print("==============================================\n")
     try:
         app = H2OHubKioskSetup()
         app.mainloop()
