@@ -220,6 +220,10 @@ class H2OHubKioskSetup(ctk.CTk):
         os._exit(0) 
 
 if __name__ == "__main__":
+
+    print("\n==============================================")
+    print("🚀 STARTING H2O HUB KIOSK (BUILD: 2 OCT 2026 - ARDUINO UNO READY)")
+    print("==============================================\n")
     try:
         app = H2OHubKioskSetup()
         app.mainloop()

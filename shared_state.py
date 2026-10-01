@@ -9,19 +9,34 @@ import serial.tools.list_ports
 
 def find_esp32_port():
     """
-    Awtomatikong hahanapin ang ESP32-S3 sa mga available na USB ports,
-    gamit ang Espressif VID (303A) sa halip na naka-fix na port name.
-    Babalik sa fallback ports kung walang mahanap.
+    Awtomatikong hahanapin ang nakasaksak na Microcontroller (Arduino Uno man o ESP32-S3)
+    sa mga available na USB ports gamit ang Vendor IDs (VID) at Device Descriptions.
     """
     ports = serial.tools.list_ports.comports()
+    
+    # 1. Hahanapin muna ang mga kilalang Microcontroller VIDs
     for port in ports:
-        if port.vid == 0x303A:
-            print(f"✅ Nahanap ang ESP32-S3 sa: {port.device}")
+        # 0x303A = ESP32-S3 / Espressif
+        # 0x2341 = Arduino Official (Uno, Mega, etc.)
+        # 0x1A86 = CH340 / USB Serial (Karaniwang Clone Arduino Uno)
+        # 0x0403 = FTDI / USB-to-Serial
+        if port.vid in [0x303A, 0x2341, 0x1A86, 0x0403]:
+            print(f"✅ Nahanap ang Hardware Device ({port.description}) sa: {port.device}")
             return port.device
 
-    print("⚠️ Walang nahanap na Espressif device, sinusubukan ang fallback ports...")
-    for fallback in ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0']:
-        if os.path.exists(fallback):
+    # 2. Kung walang nahanap sa VID, hahanapin sa pangalan/description
+    for port in ports:
+        desc = port.description.upper()
+        if "ARDUINO" in desc or "USB SERIAL" in desc or "CH340" in desc or "ESP32" in desc:
+            print(f"✅ Nahanap sa description ({port.description}) sa: {port.device}")
+            return port.device
+
+    print("⚠️ Walang nahanap na kilalang VID/Description, sinusubukan ang fallback ports...")
+    
+    # 3. Fallback ports para sa Linux / Raspberry Pi at Windows
+    fallback_list = ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', 'COM3', 'COM4', 'COM5']
+    for fallback in fallback_list:
+        if os.path.exists(fallback) or fallback.startswith('COM'):
             print(f"⚠️ Gumagamit ng fallback port: {fallback}")
             return fallback
 
