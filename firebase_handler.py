@@ -1,3 +1,4 @@
+import os
 import firebase_admin
 from firebase_admin import credentials, db
 import time
@@ -7,13 +8,22 @@ import shared_state
 
 MAX_WATER_CAPACITY = 20000  # 20 Liters = 20,000 mL
 
+# 🎯 DYNAMIC ABSOLUTE PATH SETUP PARA SA KEY.JSON
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CRED_PATH = os.path.join(BASE_DIR, "key.json")
+
 def initialize_firebase_system():
     try:
         if not firebase_admin._apps:
-            cred = credentials.Certificate("serviceAccountKey.json")
+            if not os.path.exists(CRED_PATH):
+                print(f"❌ FIREBASE ERROR: Hindi mahanap ang credential file sa: {CRED_PATH}")
+                return False
+                
+            cred = credentials.Certificate(CRED_PATH)
             firebase_admin.initialize_app(cred, {
                 'databaseURL': 'https://h2o-project-e83d9-default-rtdb.firebaseio.com'
             })
+            print("✅ Firebase Admin SDK Successfully Initialized via Absolute Path!")
         
         print(f"🔗 Firebase targeting active node: vendos/{shared_state.VENDO_ID} ({shared_state.VENDO_NAME})")
         shared_state.vendo_ref = db.reference(f'vendos/{shared_state.VENDO_ID}')
@@ -70,7 +80,7 @@ def start_heartbeat_loop():
             update_vending_status("Connected", water_percentage)
         except Exception:
             pass
-        time.sleep(5) 
+        time.sleep(10) 
 
 def listen_for_price_config():
     def price_listener(event):

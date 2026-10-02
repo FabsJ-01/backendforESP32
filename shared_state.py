@@ -43,16 +43,16 @@ def find_esp32_port():
     print("❌ Walang nahanap na anumang serial port!")
     return None
 
-SERIAL_PORT = find_esp32_port()
+SERIAL_PORT = None
 BAUD_RATE = 115200
 CONFIG_FILE = "config.json"
 
 VENDO_ID = "vendo_004"
 VENDO_NAME = "Lobby Dispenser 1"
 
-current_water_level = 16000
+current_water_level = 20000
 active_student_uid = None
-esp32 = None
+esp32 = None    
 # Lock para siguraduhing IISANG thread lang ang gumagalaw sa serial port
 # sa isang pagkakataon - iniiwasan ang corruption/garbled data na dulot ng
 # sabay-sabay na read/write mula sa magkaibang threads.

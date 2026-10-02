@@ -7,6 +7,7 @@ import time
 # --- 1. SINGLE INSTANCE LOCK (PIGILAN ANG PAGDODOBLE NG APP) ---
 try:
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     lock_socket.bind(('127.0.0.1', 65432))
 except socket.error:
     print("⚠️ Naka-run na ang H2O HUB Kiosk App! Isasara ang bagong instance.")
@@ -182,7 +183,7 @@ class H2OHubKioskSetup(ctk.CTk):
                 bg_color = "#E6F4EA"
 
             self.system_status_label.configure(text=text, text_color=color, fg_color=bg_color)
-            self.system_status_label.update_idletasks()
+            #self.system_status_label.update_idletasks()
 
         self.after(0, adjust_ui)
 
