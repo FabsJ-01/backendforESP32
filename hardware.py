@@ -119,7 +119,7 @@ def process_scanned_student(scanned_uid):
             if current_status and current_status.get('coin_trigger') == True:
 
                 dispense_started = True
-                shared_state.actual_dispensed_ml = 0
+                shared_state.actual_dispensed_ml = 0.0
 
                 if shared_state.esp32:
                     shared_state.is_flow_monitoring_mode = True
@@ -160,13 +160,17 @@ def process_scanned_student(scanned_uid):
 
                     time.sleep(0.05)
 
-                # ========================================================
-                # VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG
-                # ========================================================
-                poured_ml = getattr(shared_state, 'actual_dispensed_ml', 0)
-                poured_ml = min(poured_ml, shared_state.ml_to_dispense)
+                # Bigyan ng konting pahinga (0.5s) upang makahabol ang anumang natitirang Serial Message mula sa ESP32
+                time.sleep(0.5)
 
-                print(f"\n📊 FINAL DISPENSED AMOUNT: {poured_ml} mL (Target was {shared_state.ml_to_dispense} mL)")
+                # ========================================================
+                # VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG (PAUSE / TIMEOUT SAFE)
+                # ========================================================
+                poured_ml = float(getattr(shared_state, 'actual_dispensed_ml', 0.0))
+                poured_ml = min(poured_ml, float(shared_state.ml_to_dispense))
+                poured_ml = round(poured_ml, 1)
+
+                print(f"\n📊 FINAL DISPENSED AMOUNT TO RECORD: {poured_ml} mL (Target was {shared_state.ml_to_dispense} mL)")
 
                 if poured_ml <= 0:
                     print("⚠️ 0 mL dispensed. Skipping Firebase intake update and logs.")
@@ -178,7 +182,7 @@ def process_scanned_student(scanned_uid):
                     break
 
                 # Update gallon water level
-                shared_state.current_water_level = max(0, shared_state.current_water_level - poured_ml)
+                shared_state.current_water_level = max(0, shared_state.current_water_level - int(poured_ml))
                 water_percentage = round((shared_state.current_water_level / _water_capacity()) * 100)
 
                 try:
@@ -187,7 +191,16 @@ def process_scanned_student(scanned_uid):
                 except Exception as e:
                     print(f"⚠️ Water level push error: {e}")
 
-                new_intake = (current_status.get('intake', 0) or 0) + poured_ml
+                # KUNIN AT IPAGPATONG (ACCUMULATE) SA KASALUKUYANG INTAKE NG USER
+                current_user_data = user_ref.get() or {}
+                raw_intake = current_user_data.get('intake', 0) or 0
+                
+                # Siguraduhing float value ang nareread
+                if isinstance(raw_intake, str):
+                    raw_intake = raw_intake.replace('M', '').replace('m', '').strip()
+                
+                old_intake = float(raw_intake)
+                new_intake = round(old_intake + poured_ml, 1)
                 finish_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
                 user_ref.update({
@@ -197,6 +210,8 @@ def process_scanned_student(scanned_uid):
                     'coin_trigger': False,
                     'last_credits': 0
                 })
+
+                print(f"🥛 [SUCCESS INTAKE UPDATE]: Old Intake: {old_intake} mL + Added: {poured_ml} mL = New Intake: {new_intake} mL")
 
                 user_psu_id = user_data.get('psu_id', 'N/A')
                 is_full = poured_ml >= (shared_state.ml_to_dispense - 5)
@@ -301,7 +316,7 @@ def _start_hardware_listener():
 
                 print(f"📡 [RAW HARDWARE DATA]: {hardware_data}")
 
-                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER (DAGDAG)
+                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER
                 if hardware_data.startswith("TEST_PULSES_RESULT:"):
                     try:
                         total_pulses = int(hardware_data.split(":")[1].strip())
@@ -367,8 +382,8 @@ def _start_hardware_listener():
                     if hardware_data.startswith("DISPENSED_FINAL_ML:"):
                         try:
                             final_ml_val = float(hardware_data.split(":")[1].strip())
-                            shared_state.actual_dispensed_ml = int(round(final_ml_val))
-                            print(f"\n⏱️️ Final Volume Received: {final_ml_val:.1f} mL")
+                            shared_state.actual_dispensed_ml = round(final_ml_val, 1)
+                            print(f"\n⏱ Final Volume Received: {shared_state.actual_dispensed_ml} mL")
                         except Exception as e:
                             print(f"⚠️ Error parsing final ml: {e}")
 
@@ -380,11 +395,11 @@ def _start_hardware_listener():
                             dispensed_val = float(dispensed_ml_str)
                             target_val = float(target_ml_str)
 
-                            shared_state.actual_dispensed_ml = int(round(dispensed_val))
+                            # I-save habang nagpo-progress
+                            shared_state.actual_dispensed_ml = round(dispensed_val, 1)
 
                             percent = min(100, round((dispensed_val / max(1.0, target_val)) * 100))
                             
-                            # Pag-update ng status label batay sa kung naka-pause o aktibo
                             if not getattr(shared_state, 'is_pump_paused', False):
                                 status_txt = f"💧 Dispensing: {percent}% ({shared_state.actual_dispensed_ml}mL / {shared_state.ml_to_dispense:.0f}mL)"
                                 print(f"\r{status_txt}", end="")
@@ -392,8 +407,13 @@ def _start_hardware_listener():
                         except (IndexError, ValueError):
                             pass
 
+                    # KAGANAPAN KAPAG NATAPOS O NAG-TIMEOUT SA PAUSE
                     elif "TARGET_REACHED" in hardware_data or "PUMP_OFF" in hardware_data or "PAUSE_TIMEOUT" in hardware_data:
-                        print(f"\n✅ Dispensing terminated ({hardware_data}). Final calculated volume: {shared_state.actual_dispensed_ml} mL")
+                        print(f"\n✅ Dispensing terminated ({hardware_data}). Current calculated volume: {shared_state.actual_dispensed_ml} mL")
+                        
+                        # Bigyan ng konting delay para makuha kung may huling DISPENSED_FINAL_ML na darating
+                        time.sleep(0.3)
+                        
                         shared_state.is_flow_monitoring_mode = False
                         shared_state.is_pump_paused = False
 
