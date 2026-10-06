@@ -109,46 +109,79 @@ def process_scanned_student(scanned_uid):
     # 2. DISPENSE TRIGGER WAIT LOOP
     dispense_started = False
 
-    # === IDLE TIMEOUT CONFIGURATION ===
-    IDLE_TIMEOUT_SECONDS = 30.0  # Bibigyan ng 30 seconds ang user bago mag-timeout kung walang galaw
+    # === CONFIGURATION AT INITIALIZATION ===
+    IDLE_TIMEOUT_SECONDS = 30.0   # 30 seconds idle timeout bago i-release ang kiosk
+    ML_PER_PESO = 100            # Fixed rate: 100 mL bawat ₱1
+    
     wait_start_time = time.time()
+    previous_credits = 0          # In-initialize sa labas para iwas UnboundLocalError
 
-    # 🔴 DAPAT NAKA-INITIALIZE DITO BAGO MAG-WHILE LOOP
-    previous_credits = 0
     while True:
         try:
             if shared_state.vendo_ref.child('force_dispense').get() is True:
                 break
 
-            current_status = user_ref.get()
+            current_status = user_ref.get() or {}
 
-            # ----------------------------------------------------
+           # ----------------------------------------------------
             # A. KAPAG NAG-TRIGGER NA NG DISPENSE (COIN / BUTTON)
             # ----------------------------------------------------
-            if current_status and current_status.get('coin_trigger') == True:
+            if current_status.get('coin_trigger') == True:
 
                 dispense_started = True
                 shared_state.actual_dispensed_ml = 0.0
 
+                # ========================================================
+                # 1. BASE ENTITLEMENT (FIXED AT 1 PESO = 100 mL FOR APP & LOGS)
+                # ========================================================
+                inserted_coins = float(current_status.get('last_credits', 0) or 0)
+                
+                # CONDITION: Guaranteed 100 mL per 1 Peso sa App at Intake Records
+                target_dispense_ml = inserted_coins * 100.0  # ₱1 -> 100mL, ₱2 -> 200mL, ₱5 -> 500mL
+                
+                # Set ang ipapakitang volume sa Mobile App at Logging
+                shared_state.ml_to_dispense = target_dispense_ml
+
+                # Update agad sa Firebase para 100mL (o x100) lang ang makita ng user sa App
+                user_ref.update({
+                    'target_volume': target_dispense_ml,
+                    'dispensing_status': 'processing'
+                })
+
+                # ========================================================
+                # 2. HARDWARE / ESP32 MULTIPLIER CONDITION
+                # ========================================================
+                # Kukunin ang calibration factor mula sa Web Settings (halimbawa 150)
+                try:
+                    settings_ref = shared_state.vendo_ref.child('settings').get() or {}
+                    web_calibration = float(settings_ref.get('ml_per_peso', 100))
+                except Exception as e:
+                    print(f"⚠️ Error reading calibration: {e}")
+                    web_calibration = 100.0
+
+                # Kina-kalkula lang ang totoong ipapadalang target sa ESP32 pump
+                # Multiplier Factor = web_calibration / 100 (e.g., 150 / 100 = 1.5)
+                calibration_factor = web_calibration / 100.0
+                esp32_target_ml = target_dispense_ml * calibration_factor
+
+                # TRIGGER ESP32 PUMP
                 if shared_state.esp32:
                     shared_state.is_flow_monitoring_mode = True
                     shared_state.is_pump_paused = False
                     shared_state.paused_time_offset = 0.0
 
-                    target_ml = float(shared_state.ml_to_dispense)
-                    command_to_send = f"START_PUMP_ML:{target_ml:.1f}\n"
+                    command_to_send = f"START_PUMP_ML:{esp32_target_ml:.1f}\n"
 
                     with shared_state.serial_lock:
                         shared_state.esp32.reset_input_buffer()
                         shared_state.esp32.write(command_to_send.encode())
 
-                    print(f"📡 [SERIAL SENT]: {command_to_send.strip()} para sa {shared_state.ml_to_dispense}mL")
+                    print(f"📡 [SERIAL SENT TO ESP32]: {command_to_send.strip()} (Base Entitlement: {target_dispense_ml} mL)")
 
                 start_flow_time = time.time()
 
                 # 3. DISPENSING PROGRESS MONITORING LOOP
                 while shared_state.is_flow_monitoring_mode:
-                    # Ang oras na naka-pause ay HINDI binibilang sa safety timeout
                     if not getattr(shared_state, 'is_pump_paused', False):
                         active_time = (time.time() - start_flow_time) - getattr(shared_state, 'paused_time_offset', 0.0)
                         if active_time > SAFETY_TIMEOUT_SECONDS:
@@ -160,7 +193,6 @@ def process_scanned_student(scanned_uid):
                                 except Exception as e:
                                     print(f"⚠️ Serial Write Error (STOP_PUMP): {e}")
                             
-                            # Hintayin sandali ang huling final response ng ESP32
                             wait_start = time.time()
                             while shared_state.is_flow_monitoring_mode and (time.time() - wait_start) < 3.0:
                                 time.sleep(0.05)
@@ -169,15 +201,12 @@ def process_scanned_student(scanned_uid):
 
                     time.sleep(0.05)
 
-                # Bigyan ng konting pahinga (0.5s) upang makahabol ang anumang natitirang Serial Message mula sa ESP32
                 time.sleep(0.5)
 
-                # ========================================================
-                # VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG (PAUSE / TIMEOUT SAFE)
-                # ========================================================
-                poured_ml = float(getattr(shared_state, 'actual_dispensed_ml', 0.0))
+                # 4. VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG
+                poured_ml = getattr(shared_state, 'actual_dispensed_ml', 0.0)
                 poured_ml = min(poured_ml, float(shared_state.ml_to_dispense))
-                poured_ml = round(poured_ml, 1)
+                poured_ml = round(float(poured_ml), 1)
 
                 print(f"\n📊 FINAL DISPENSED AMOUNT TO RECORD: {poured_ml} mL (Target was {shared_state.ml_to_dispense} mL)")
 
@@ -196,18 +225,16 @@ def process_scanned_student(scanned_uid):
 
                 try:
                     shared_state.vendo_ref.update({'water_level': water_percentage})
-                    print(f"📉 GALLON UPDATE: {shared_state.current_water_level}mL remaining ({water_percentage}%)")
+                    print(f"📉 GALLON UPDATE: {shared_state.current_water_level} mL remaining ({water_percentage}%)")
                 except Exception as e:
                     print(f"⚠️ Water level push error: {e}")
 
-                # KUNIN AT IPAGPATONG (ACCUMULATE) SA KASALUKUYANG INTAKE NG USER
+                # Accumulate current intake ng user
                 current_user_data = user_ref.get() or {}
                 raw_intake = current_user_data.get('intake', 0) or 0
-                
-                # Siguraduhing float value ang nareread
                 if isinstance(raw_intake, str):
                     raw_intake = raw_intake.replace('M', '').replace('m', '').strip()
-                
+
                 old_intake = float(raw_intake)
                 new_intake = round(old_intake + poured_ml, 1)
                 finish_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -239,34 +266,34 @@ def process_scanned_student(scanned_uid):
                 break
 
             # ----------------------------------------------------
-            # B. WALA PANG DISPENSE: CHECK IDLE TIMEOUT
+            # B. WALA PANG DISPENSE: IDLE TIMEOUT MONITORING
             # ----------------------------------------------------
             else:
-                current_credits = current_status.get('last_credits', 0) or 0
-                
-                # 🔹 I-reset LAMANG ang timer KUNG MAY BAGONG HULOG NA BARYA (tumaas ang credits)
+                current_credits = float(current_status.get('last_credits', 0) or 0)
+
+                # Reset ng timer KAPAG LANG MAY BAGONG HULOG NA BARYA
                 if current_credits > previous_credits:
                     print(f"🪙 [COIN DETECTED]: Credits updated to {current_credits}. Resetting idle timer...")
                     wait_start_time = time.time()
-                    previous_credits = current_credits  # Update local reference
+                    previous_credits = current_credits
 
-                # 🔹 Kapag WALANG BAGONG HULOG at lumagpas na sa IDLE_TIMEOUT_SECONDS:
+                # Timeout Trigger kapag walang galaw ang user sa loob ng IDLE_TIMEOUT_SECONDS
                 if (time.time() - wait_start_time) > IDLE_TIMEOUT_SECONDS:
-                    print(f"\n⏰ [IDLE TIMEOUT] Lumagpas sa {IDLE_TIMEOUT_SECONDS:.0f}s na walang aksyon mula sa user. Clearing transaction...")
-                    
+                    print(f"\n⏰ [IDLE TIMEOUT] Lumagpas sa {IDLE_TIMEOUT_SECONDS:.0f}s na walang aksyon. Resetting session...")
+
                     user_ref.update({
                         'is_scanning': False,
                         'coin_trigger': False,
                         'last_credits': 0
                     })
-                    
+
                     if shared_state.esp32:
                         try:
                             with shared_state.serial_lock:
                                 shared_state.esp32.write(b'TIMEOUT_RESET\n')
                         except Exception as e:
                             print(f"⚠️ Serial Write Error (TIMEOUT_RESET): {e}")
-                    
+
                     break
 
         except Exception as e:
@@ -284,6 +311,7 @@ def process_scanned_student(scanned_uid):
     shared_state.active_student_uid = None
     print("🔒 Kiosk lock released. Ready for next transaction.")
     _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
+
 
 # ============================================
 # HARDWARE CONNECTION & BACKGROUND LISTENER
@@ -355,7 +383,7 @@ def _start_hardware_listener():
 
                 print(f"📡 [RAW HARDWARE DATA]: {hardware_data}")
 
-                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER
+                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER (DAGDAG)
                 if hardware_data.startswith("TEST_PULSES_RESULT:"):
                     try:
                         total_pulses = int(hardware_data.split(":")[1].strip())
@@ -421,8 +449,8 @@ def _start_hardware_listener():
                     if hardware_data.startswith("DISPENSED_FINAL_ML:"):
                         try:
                             final_ml_val = float(hardware_data.split(":")[1].strip())
-                            shared_state.actual_dispensed_ml = round(final_ml_val, 1)
-                            print(f"\n⏱ Final Volume Received: {shared_state.actual_dispensed_ml} mL")
+                            shared_state.actual_dispensed_ml = int(round(final_ml_val))
+                            print(f"\n⏱️️ Final Volume Received: {final_ml_val:.1f} mL")
                         except Exception as e:
                             print(f"⚠️ Error parsing final ml: {e}")
 
@@ -434,11 +462,11 @@ def _start_hardware_listener():
                             dispensed_val = float(dispensed_ml_str)
                             target_val = float(target_ml_str)
 
-                            # I-save habang nagpo-progress
-                            shared_state.actual_dispensed_ml = round(dispensed_val, 1)
+                            shared_state.actual_dispensed_ml = int(round(dispensed_val))
 
                             percent = min(100, round((dispensed_val / max(1.0, target_val)) * 100))
                             
+                            # Pag-update ng status label batay sa kung naka-pause o aktibo
                             if not getattr(shared_state, 'is_pump_paused', False):
                                 status_txt = f"💧 Dispensing: {percent}% ({shared_state.actual_dispensed_ml}mL / {shared_state.ml_to_dispense:.0f}mL)"
                                 print(f"\r{status_txt}", end="")
@@ -446,13 +474,8 @@ def _start_hardware_listener():
                         except (IndexError, ValueError):
                             pass
 
-                    # KAGANAPAN KAPAG NATAPOS O NAG-TIMEOUT SA PAUSE
                     elif "TARGET_REACHED" in hardware_data or "PUMP_OFF" in hardware_data or "PAUSE_TIMEOUT" in hardware_data:
-                        print(f"\n✅ Dispensing terminated ({hardware_data}). Current calculated volume: {shared_state.actual_dispensed_ml} mL")
-                        
-                        # Bigyan ng konting delay para makuha kung may huling DISPENSED_FINAL_ML na darating
-                        time.sleep(0.3)
-                        
+                        print(f"\n✅ Dispensing terminated ({hardware_data}). Final calculated volume: {shared_state.actual_dispensed_ml} mL")
                         shared_state.is_flow_monitoring_mode = False
                         shared_state.is_pump_paused = False
 
