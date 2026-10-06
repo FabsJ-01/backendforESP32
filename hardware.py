@@ -109,6 +109,12 @@ def process_scanned_student(scanned_uid):
     # 2. DISPENSE TRIGGER WAIT LOOP
     dispense_started = False
 
+    # === IDLE TIMEOUT CONFIGURATION ===
+    IDLE_TIMEOUT_SECONDS = 30.0  # Bibigyan ng 30 seconds ang user bago mag-timeout kung walang galaw
+    wait_start_time = time.time()
+
+    # 🔴 DAPAT NAKA-INITIALIZE DITO BAGO MAG-WHILE LOOP
+    previous_credits = 0
     while True:
         try:
             if shared_state.vendo_ref.child('force_dispense').get() is True:
@@ -116,6 +122,9 @@ def process_scanned_student(scanned_uid):
 
             current_status = user_ref.get()
 
+            # ----------------------------------------------------
+            # A. KAPAG NAG-TRIGGER NA NG DISPENSE (COIN / BUTTON)
+            # ----------------------------------------------------
             if current_status and current_status.get('coin_trigger') == True:
 
                 dispense_started = True
@@ -229,6 +238,37 @@ def process_scanned_student(scanned_uid):
                 })
                 break
 
+            # ----------------------------------------------------
+            # B. WALA PANG DISPENSE: CHECK IDLE TIMEOUT
+            # ----------------------------------------------------
+            else:
+                current_credits = current_status.get('last_credits', 0) or 0
+                
+                # 🔹 I-reset LAMANG ang timer KUNG MAY BAGONG HULOG NA BARYA (tumaas ang credits)
+                if current_credits > previous_credits:
+                    print(f"🪙 [COIN DETECTED]: Credits updated to {current_credits}. Resetting idle timer...")
+                    wait_start_time = time.time()
+                    previous_credits = current_credits  # Update local reference
+
+                # 🔹 Kapag WALANG BAGONG HULOG at lumagpas na sa IDLE_TIMEOUT_SECONDS:
+                if (time.time() - wait_start_time) > IDLE_TIMEOUT_SECONDS:
+                    print(f"\n⏰ [IDLE TIMEOUT] Lumagpas sa {IDLE_TIMEOUT_SECONDS:.0f}s na walang aksyon mula sa user. Clearing transaction...")
+                    
+                    user_ref.update({
+                        'is_scanning': False,
+                        'coin_trigger': False,
+                        'last_credits': 0
+                    })
+                    
+                    if shared_state.esp32:
+                        try:
+                            with shared_state.serial_lock:
+                                shared_state.esp32.write(b'TIMEOUT_RESET\n')
+                        except Exception as e:
+                            print(f"⚠️ Serial Write Error (TIMEOUT_RESET): {e}")
+                    
+                    break
+
         except Exception as e:
             print(f"⚠️ Error inside active listen loop: {e}")
             if dispense_started:
@@ -244,7 +284,6 @@ def process_scanned_student(scanned_uid):
     shared_state.active_student_uid = None
     print("🔒 Kiosk lock released. Ready for next transaction.")
     _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
-
 
 # ============================================
 # HARDWARE CONNECTION & BACKGROUND LISTENER
