@@ -44,10 +44,15 @@ def process_scanned_student(scanned_uid):
         return
 
     shared_state.active_student_uid = scanned_uid
-    user_ref.update({'coin_trigger': False, 'is_scanning': False, 'last_credits': 0})
+    user_ref.update({'coin_trigger': False, 'is_scanning': True, 'last_credits': 0})#<================== False
     welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}!"
     print(welcome_msg)
     _set_status(welcome_msg, "#3498db")
+
+
+    time.sleep(1.0)
+    user_ref.update({'is_scanning': False})
+    print("is_scanning False Waiting for coins")#<==================
 
     shared_state.coin_amount = 0
     shared_state.last_coin_time = time.time()
@@ -97,7 +102,7 @@ def process_scanned_student(scanned_uid):
         return
 
     shared_state.ml_to_dispense = shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO
-    user_ref.update({'last_credits': shared_state.coin_amount, 'is_scanning': True})
+    user_ref.update({'last_credits': shared_state.coin_amount, 'is_scanning': True, 'is_dispensing': False, 'coin_trigger': True})
 
     _set_status(
         f"🪙 Final Total: ₱{shared_state.coin_amount} ({shared_state.ml_to_dispense:.0f}mL). Tap Dispense on Phone!",
@@ -126,8 +131,10 @@ def process_scanned_student(scanned_uid):
            # ----------------------------------------------------
             # A. KAPAG NAG-TRIGGER NA NG DISPENSE (COIN / BUTTON)
             # ----------------------------------------------------
-            if current_status.get('coin_trigger') == True:
+            if current_status.get('is_dispensing') == True:#<=====Pinalitan from coin_trigger
 
+                user_ref.update({'coin_trigger': False, 'is_dispensing': False})#<=========== Nadagdag
+                
                 dispense_started = True
                 shared_state.actual_dispensed_ml = 0.0
 
