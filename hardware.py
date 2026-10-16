@@ -30,6 +30,9 @@ def _set_status(text, color):
 # ============================================
 # PROCESS SCANNED STUDENT (QR / RFID LOGIC)
 # ============================================
+# ============================================
+# PROCESS SCANNED STUDENT (QR / RFID LOGIC)
+# ============================================
 def process_scanned_student(scanned_uid):
     scanned_uid = scanned_uid.strip()
     if not scanned_uid:
@@ -47,40 +50,29 @@ def process_scanned_student(scanned_uid):
     pending_water = float(user_data.get('pending_ml', 0.0) or 0.0)
     claim_pending = user_data.get('claim_pending', False)
 
-    is_claimed_now = False
-
-    # Suriin kung pinindot ang Claim button sa app o kung may unclaimed pending water
-    if claim_pending and pending_water > 0:
-        shared_state.current_user_pending_water = pending_water
-        print(f"📦 [PENDING CLAIMED]: Successfully claimed {pending_water} mL from App!")
-        
-        # I-reset agad ang pending sa Firebase dahil kinuha na ng user para i-dispense
-        user_ref.update({
-            'pending_ml': 0.0,
-            'claim_pending': False
-        })
-        is_claimed_now = True
-    else:
-        shared_state.current_user_pending_water = 0.0
-        if pending_water > 0:
-            print(f"💡 [PENDING STORED]: Mayroon kang {pending_water} mL na nakaimbak (Hindi pa nika-claim sa app).")
-
     shared_state.active_student_uid = scanned_uid
-    user_ref.update({'coin_trigger': False, 'is_scanning': True, 'last_credits': 0})
+    
+    # I-set muna sa True ang is_scanning para sa UI ng app
+    user_ref.update({
+        'coin_trigger': False, 
+        'is_scanning': True, 
+        'is_dispensing': False,
+        'last_credits': 0
+    })
 
-    if is_claimed_now:
-        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}! (Claimed: {pending_water}mL)"
-    elif pending_water > 0:
-        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}! (May {pending_water}mL ka pang pending water)"
+    if pending_water > 0 and claim_pending:
+        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}! (May {pending_water}mL pending water)"
+        print(f"💡 [PENDING DETECTED]: Mayroon kang {pending_water} mL. Naghihintay sa pagpindot ng Claim button...")
     else:
         welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}!"
+        print(welcome_msg)
 
-    print(welcome_msg)
     _set_status(welcome_msg, "#3498db")
-
     time.sleep(1.0)
+    
+    # Tapos na ang scanning state, lilitaw na ang buttons sa app
     user_ref.update({'is_scanning': False})
-    print("is_scanning False Waiting for coins")
+    print("is_scanning False. Waiting for Claim or Coins...")
 
     shared_state.coin_amount = 0
     shared_state.last_coin_time = time.time()
@@ -94,9 +86,12 @@ def process_scanned_student(scanned_uid):
         except Exception as e:
             print(f"⚠️ Serial Write Error (READY_FOR_COINS): {e}")
 
-    print(f"🪙 Waiting for coins for user: {scanned_uid}...")
+    print(f"🪙 Waiting for coins or claim for user: {scanned_uid}...")
 
-    # 1. COIN ACCUMULATION LOOP
+    # 1. COIN & CLAIM ACCUMULATION LOOP (Dito aabangan ang Claim o Barya)
+    claimed_water = 0.0
+    is_claimed_now = False
+
     while shared_state.is_coin_accumulation_mode:
         try:
             if shared_state.vendo_ref.child('force_dispense').get() is True:
@@ -106,13 +101,39 @@ def process_scanned_student(scanned_uid):
         except Exception:
             pass
 
+        # 🔍 SURIIN KUNG PININDOT NA NG USER ANG CLAIM BUTTON SA APP
+        current_status = user_ref.get() or {}
+        
+        # Kapag nag-signal ang app na pinindot ang claim ('is_claiming': True)
+        app_claiming = current_status.get('is_claiming', False)
+        
+        if app_claiming and pending_water > 0 and not is_claimed_now:
+            claimed_water = pending_water
+            shared_state.current_user_pending_water = claimed_water
+            is_claimed_now = True
+            
+            print(f"📦 [CLAIM BUTTON PRESSED]: Successfully claimed {claimed_water} mL!")
+            
+            # Ngayon pa lang natin buburahin sa Firebase para mawala ang Claim button at lumabas ang Dispense
+            user_ref.update({
+                'pending_ml': 0.0,
+                'claim_pending': False,
+                'is_claiming': False,
+                'coin_trigger': True
+            })
+            
+            _set_status(f"📦 Claimed {claimed_water}mL! Maghulog ng barya o i-tap ang Dispense.", "#2ecc71")
+            time.sleep(0.5)
+
+        # Timeout sa barya kung may hinulog
         if shared_state.coin_amount > 0 and (time.time() - shared_state.last_coin_time > shared_state.timeout_duration):
             print(f"\n⏳ Coin insertion timeout. Total accumulated: ₱{shared_state.coin_amount}")
             shared_state.is_coin_accumulation_mode = False
             break
 
-        if shared_state.coin_amount == 0 and (time.time() - shared_state.last_coin_time > 40.0):
-            print(f"\n⏳ Kiosk Session Timeout. Walang baryang hinulog.")
+        # Kiosk Session Timeout (40 seconds na walang barya at hindi nag-claim)
+        if shared_state.coin_amount == 0 and not is_claimed_now and (time.time() - shared_state.last_coin_time > 40.0):
+            print(f"\n⏳ Kiosk Session Timeout. Walang barya at hindi nag-claim.")
             if shared_state.esp32:
                 try:
                     with shared_state.serial_lock:
@@ -122,21 +143,36 @@ def process_scanned_student(scanned_uid):
             shared_state.is_coin_accumulation_mode = False
             break
 
+        # Kung may hinulog na barya O kaya ay na-claim na, pwede nang mag-break para tumuloy sa dispense loop
+        if shared_state.coin_amount > 0 or is_claimed_now:
+            # Bibigyan natin ng konting sandali kung sakaling maghuhulog pa ng barya pagkatapos mag-claim,
+            # pero kung tapos na ang paghihintay ng barya, mag-break na paglipas ng ilang segundo o kapag pinindot ang dispense.
+            pass
+
+        # Kung direktang pinindot na ang Dispense button sa app habang nasa accumulation loop
+        if current_status.get('is_dispensing') == True:
+            shared_state.is_coin_accumulation_mode = False
+            break
+
         time.sleep(0.2)
 
-    # Suriin kung walang barya at walang na-claim na pending water
-    claimed_water = float(getattr(shared_state, 'current_user_pending_water', 0.0) or 0.0)
+    # Kalkulahin ang kabuuang ML (Barya + Na-claim na Pending Water)
+    coin_ml = float(shared_state.coin_amount) * float(shared_state.LIVE_ML_PER_PESO)
+    shared_state.ml_to_dispense = coin_ml + claimed_water
+
+    # Suriin kung walang barya at walang na-claim na tubig
     if shared_state.coin_amount == 0 and claimed_water <= 0:
         print("⏳ Walang barya at walang na-claim na tubig. Kina-cancel ang session.")
         shared_state.active_student_uid = None
         _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
         return
 
-    # Kalkulahin ang kabuuang ML (Barya + Na-claim na Pending Water)
-    coin_ml = float(shared_state.coin_amount) * float(shared_state.LIVE_ML_PER_PESO)
-    shared_state.ml_to_dispense = coin_ml + claimed_water
-
-    user_ref.update({'last_credits': shared_state.coin_amount, 'is_scanning': True, 'is_dispensing': False, 'coin_trigger': True})
+    user_ref.update({
+        'last_credits': shared_state.coin_amount, 
+        'target_volume': shared_state.ml_to_dispense,
+        'is_scanning': False, 
+        'coin_trigger': True
+    })
 
     _set_status(
         f"🪙 Final Total: ₱{shared_state.coin_amount} ({shared_state.ml_to_dispense:.0f}mL). Tap Dispense on Phone!",
@@ -366,8 +402,7 @@ def process_scanned_student(scanned_uid):
     shared_state.active_student_uid = None
     print("🔒 Kiosk lock released. Ready for next transaction.")
     _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
-
-
+    
 # ============================================
 # HARDWARE CONNECTION & BACKGROUND LISTENER
 # ============================================
