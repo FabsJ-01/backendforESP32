@@ -43,16 +43,44 @@ def process_scanned_student(scanned_uid):
         shared_state.active_student_uid = None
         return
 
+    # 📦 KUNIN ANG PENDING WATER AT CLAIM STATUS MULA SA FIREBASE
+    pending_water = float(user_data.get('pending_ml', 0.0) or 0.0)
+    claim_pending = user_data.get('claim_pending', False)
+
+    is_claimed_now = False
+
+    # Suriin kung pinindot ang Claim button sa app o kung may unclaimed pending water
+    if claim_pending and pending_water > 0:
+        shared_state.current_user_pending_water = pending_water
+        print(f"📦 [PENDING CLAIMED]: Successfully claimed {pending_water} mL from App!")
+        
+        # I-reset agad ang pending sa Firebase dahil kinuha na ng user para i-dispense
+        user_ref.update({
+            'pending_ml': 0.0,
+            'claim_pending': False
+        })
+        is_claimed_now = True
+    else:
+        shared_state.current_user_pending_water = 0.0
+        if pending_water > 0:
+            print(f"💡 [PENDING STORED]: Mayroon kang {pending_water} mL na nakaimbak (Hindi pa nika-claim sa app).")
+
     shared_state.active_student_uid = scanned_uid
-    user_ref.update({'coin_trigger': False, 'is_scanning': True, 'last_credits': 0})#<================== False
-    welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}!"
+    user_ref.update({'coin_trigger': False, 'is_scanning': True, 'last_credits': 0})
+
+    if is_claimed_now:
+        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}! (Claimed: {pending_water}mL)"
+    elif pending_water > 0:
+        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}! (May {pending_water}mL ka pang pending water)"
+    else:
+        welcome_msg = f"👋 Welcome, {user_data.get('name', 'Student')}!"
+
     print(welcome_msg)
     _set_status(welcome_msg, "#3498db")
 
-
     time.sleep(1.0)
     user_ref.update({'is_scanning': False})
-    print("is_scanning False Waiting for coins")#<==================
+    print("is_scanning False Waiting for coins")
 
     shared_state.coin_amount = 0
     shared_state.last_coin_time = time.time()
@@ -96,12 +124,18 @@ def process_scanned_student(scanned_uid):
 
         time.sleep(0.2)
 
-    if shared_state.coin_amount == 0:
+    # Suriin kung walang barya at walang na-claim na pending water
+    claimed_water = float(getattr(shared_state, 'current_user_pending_water', 0.0) or 0.0)
+    if shared_state.coin_amount == 0 and claimed_water <= 0:
+        print("⏳ Walang barya at walang na-claim na tubig. Kina-cancel ang session.")
         shared_state.active_student_uid = None
         _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
         return
 
-    shared_state.ml_to_dispense = shared_state.coin_amount * shared_state.LIVE_ML_PER_PESO
+    # Kalkulahin ang kabuuang ML (Barya + Na-claim na Pending Water)
+    coin_ml = float(shared_state.coin_amount) * float(shared_state.LIVE_ML_PER_PESO)
+    shared_state.ml_to_dispense = coin_ml + claimed_water
+
     user_ref.update({'last_credits': shared_state.coin_amount, 'is_scanning': True, 'is_dispensing': False, 'coin_trigger': True})
 
     _set_status(
@@ -109,6 +143,7 @@ def process_scanned_student(scanned_uid):
         "#f1c40f"
     )
 
+    print(f"📱 Ready! Coins: ₱{shared_state.coin_amount} ({coin_ml}mL) + Claimed Water: {claimed_water}mL = Total: {shared_state.ml_to_dispense}mL")
     print("📱 Waiting for Mobile App 'Dispense' click...")
 
     # 2. DISPENSE TRIGGER WAIT LOOP
@@ -128,28 +163,34 @@ def process_scanned_student(scanned_uid):
 
             current_status = user_ref.get() or {}
 
-           # ----------------------------------------------------
+            # ----------------------------------------------------
             # A. KAPAG NAG-TRIGGER NA NG DISPENSE (COIN / BUTTON)
             # ----------------------------------------------------
-            if current_status.get('is_dispensing') == True:#<=====Pinalitan from coin_trigger
+            if current_status.get('is_dispensing') == True:
 
-                user_ref.update({'coin_trigger': False, 'is_dispensing': False})#<=========== Nadagdag
+                user_ref.update({'coin_trigger': False, 'is_dispensing': False})
                 
                 dispense_started = True
                 shared_state.actual_dispensed_ml = 0.0
 
                 # ========================================================
-                # 1. BASE ENTITLEMENT (FIXED AT 1 PESO = 100 mL FOR APP & LOGS)
+                # 1. BASE ENTITLEMENT (Barya + Na-claim na Pending Water)
                 # ========================================================
                 inserted_coins = float(current_status.get('last_credits', 0) or 0)
+                base_coin_ml = inserted_coins * ML_PER_PESO  # ₱1 -> 100mL, ₱2 -> 200mL, ₱5 -> 500mL
                 
-                # CONDITION: Guaranteed 100 mL per 1 Peso sa App at Intake Records
-                target_dispense_ml = inserted_coins * 100.0  # ₱1 -> 100mL, ₱2 -> 200mL, ₱5 -> 500mL
+                # Condition para sa Pagsasama ng Barya at Claimed Water
+                if inserted_coins > 0 and claimed_water > 0:
+                    target_dispense_ml = base_coin_ml + claimed_water
+                elif claimed_water > 0:
+                    target_dispense_ml = claimed_water
+                else:
+                    target_dispense_ml = base_coin_ml
                 
                 # Set ang ipapakitang volume sa Mobile App at Logging
                 shared_state.ml_to_dispense = target_dispense_ml
 
-                # Update agad sa Firebase para 100mL (o x100) lang ang makita ng user sa App
+                # Update agad sa Firebase para makita ng user sa App
                 user_ref.update({
                     'target_volume': target_dispense_ml,
                     'dispensing_status': 'processing'
@@ -158,7 +199,6 @@ def process_scanned_student(scanned_uid):
                 # ========================================================
                 # 2. HARDWARE / ESP32 MULTIPLIER CONDITION
                 # ========================================================
-                # Kukunin ang calibration factor mula sa Web Settings (halimbawa 150)
                 try:
                     settings_ref = shared_state.vendo_ref.child('settings').get() or {}
                     web_calibration = float(settings_ref.get('ml_per_peso', 100))
@@ -166,8 +206,6 @@ def process_scanned_student(scanned_uid):
                     print(f"⚠️ Error reading calibration: {e}")
                     web_calibration = 100.0
 
-                # Kina-kalkula lang ang totoong ipapadalang target sa ESP32 pump
-                # Multiplier Factor = web_calibration / 100 (e.g., 150 / 100 = 1.5)
                 calibration_factor = web_calibration / 100.0
                 esp32_target_ml = target_dispense_ml * calibration_factor
 
@@ -183,7 +221,7 @@ def process_scanned_student(scanned_uid):
                         shared_state.esp32.reset_input_buffer()
                         shared_state.esp32.write(command_to_send.encode())
 
-                    print(f"📡 [SERIAL SENT TO ESP32]: {command_to_send.strip()} (Base Entitlement: {target_dispense_ml} mL)")
+                    print(f"📡 [SERIAL SENT TO ESP32]: {command_to_send.strip()} (Target Total: {target_dispense_ml} mL)")
 
                 start_flow_time = time.time()
 
@@ -210,19 +248,24 @@ def process_scanned_student(scanned_uid):
 
                 time.sleep(0.5)
 
-                # 4. VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG
+                # 4. VALIDATION AT UPDATE NG NAIBUHOS NA TUBIG (PARTIAL / FULL)
                 poured_ml = getattr(shared_state, 'actual_dispensed_ml', 0.0)
                 poured_ml = min(poured_ml, float(shared_state.ml_to_dispense))
                 poured_ml = round(float(poured_ml), 1)
 
-                print(f"\n📊 FINAL DISPENSED AMOUNT TO RECORD: {poured_ml} mL (Target was {shared_state.ml_to_dispense} mL)")
+                print(f"\n📊 FINAL DISPENSED AMOUNT: {poured_ml} mL (Target was {shared_state.ml_to_dispense} mL)")
+
+                # Kalkulahin ang natirang tubig (Remainder para sa pending_ml)
+                remainder_ml = round(float(shared_state.ml_to_dispense) - poured_ml, 1)
 
                 if poured_ml <= 0:
-                    print("⚠️ 0 mL dispensed. Skipping Firebase intake update and logs.")
+                    print("⚠️ 0 mL dispensed. Pinabalik ang buong target sa pending_ml.")
                     user_ref.update({
                         'is_scanning': False,
                         'coin_trigger': False,
-                        'last_credits': 0
+                        'last_credits': 0,
+                        'pending_ml': remainder_ml,
+                        'claim_pending': True if remainder_ml > 0 else False
                     })
                     break
 
@@ -246,13 +289,21 @@ def process_scanned_student(scanned_uid):
                 new_intake = round(old_intake + poured_ml, 1)
                 finish_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
+                # I-update ang Firebase (isama ang remainder sa pending_ml kung may natira)
                 user_ref.update({
                     'intake': new_intake,
                     'last_drink_time': finish_time,
                     'is_scanning': False,
                     'coin_trigger': False,
-                    'last_credits': 0
+                    'last_credits': 0,
+                    'pending_ml': remainder_ml,
+                    'claim_pending': True if remainder_ml > 5.0 else False
                 })
+
+                if remainder_ml > 5.0:
+                    print(f"📦 [PENDING SAVED]: May natirang {remainder_ml} mL na inimbak sa Firebase bilang pending_ml.")
+                else:
+                    print("✅ Naubos nang buo ang target volume!")
 
                 print(f"🥛 [SUCCESS INTAKE UPDATE]: Old Intake: {old_intake} mL + Added: {poured_ml} mL = New Intake: {new_intake} mL")
 
@@ -278,20 +329,23 @@ def process_scanned_student(scanned_uid):
             else:
                 current_credits = float(current_status.get('last_credits', 0) or 0)
 
-                # Reset ng timer KAPAG LANG MAY BAGONG HULOG NA BARYA
                 if current_credits > previous_credits:
                     print(f"🪙 [COIN DETECTED]: Credits updated to {current_credits}. Resetting idle timer...")
                     wait_start_time = time.time()
                     previous_credits = current_credits
 
-                # Timeout Trigger kapag walang galaw ang user sa loob ng IDLE_TIMEOUT_SECONDS
                 if (time.time() - wait_start_time) > IDLE_TIMEOUT_SECONDS:
-                    print(f"\n⏰ [IDLE TIMEOUT] Lumagpas sa {IDLE_TIMEOUT_SECONDS:.0f}s na walang aksyon. Resetting session...")
+                    print(f"\n⏰ [IDLE TIMEOUT] Lumagpas sa {IDLE_TIMEOUT_SECONDS:.0f}s na walang aksyon. Ibabalik sa pending_ml ang barya...")
+
+                    timeout_coins_ml = current_credits * ML_PER_PESO
+                    total_saved_pending = timeout_coins_ml + claimed_water
 
                     user_ref.update({
                         'is_scanning': False,
                         'coin_trigger': False,
-                        'last_credits': 0
+                        'last_credits': 0,
+                        'pending_ml': total_saved_pending,
+                        'claim_pending': True if total_saved_pending > 0 else False
                     })
 
                     if shared_state.esp32:
@@ -305,13 +359,7 @@ def process_scanned_student(scanned_uid):
 
         except Exception as e:
             print(f"⚠️ Error inside active listen loop: {e}")
-            if dispense_started:
-                shared_state.is_flow_monitoring_mode = False
-                try:
-                    user_ref.update({'is_scanning': False, 'coin_trigger': False, 'last_credits': 0})
-                except Exception:
-                    pass
-                break
+            break
 
         time.sleep(0.4)
 
@@ -350,7 +398,6 @@ def connect_to_esp32(max_retries=3, retry_delay=2):
 
 
 def _esp32_watchdog():
-    """Kapag na-unplug/nawala ang ESP32, susubukan nitong kumonekta ulit."""
     while True:
         if shared_state.esp32 is None:
             print("⚠️ ESP32 Disconnected. Attempting reconnection...")
@@ -390,7 +437,6 @@ def _start_hardware_listener():
 
                 print(f"📡 [RAW HARDWARE DATA]: {hardware_data}")
 
-                # 🚀 0. TEST DISPENSE PULSES RESULT HANDLER (DAGDAG)
                 if hardware_data.startswith("TEST_PULSES_RESULT:"):
                     try:
                         total_pulses = int(hardware_data.split(":")[1].strip())
@@ -403,7 +449,6 @@ def _start_hardware_listener():
                     except Exception as e:
                         print(f"⚠️ Error parsing test pulses result: {e}")
 
-                # 1. QR / CARD UID SCAN HANDLER
                 elif hardware_data.startswith("UID_"):
                     uid = hardware_data.replace("UID_", "").strip()
                     if shared_state.active_student_uid is not None:
@@ -412,7 +457,6 @@ def _start_hardware_listener():
                         continue
                     threading.Thread(target=process_scanned_student, args=(uid,), daemon=True).start()
 
-                # 2. COIN INSERTION HANDLER
                 elif shared_state.is_coin_accumulation_mode and ("_PESO" in hardware_data or "_PESOS" in hardware_data):
                     shared_state.last_coin_time = time.time()
                     coin_detected = 0
@@ -434,7 +478,6 @@ def _start_hardware_listener():
                             "#f1c40f"
                         )
 
-                # 3. PHYSICAL BUTTON PAUSE/RESUME HANDLER
                 elif hardware_data == "PUMP_PAUSED":
                     shared_state.is_pump_paused = True
                     shared_state.pause_started_at = time.time()
@@ -450,14 +493,13 @@ def _start_hardware_listener():
                     print("\n▶️ Pump resumed via physical button.")
                     _set_status(f"💧 Dispensing Water... ({shared_state.ml_to_dispense:.0f}mL Target)", "#059669")
 
-                # 4. DISPENSING PROGRESS & FINAL VOLUME RECEIVER
                 elif shared_state.is_flow_monitoring_mode:
 
                     if hardware_data.startswith("DISPENSED_FINAL_ML:"):
                         try:
                             final_ml_val = float(hardware_data.split(":")[1].strip())
                             shared_state.actual_dispensed_ml = int(round(final_ml_val))
-                            print(f"\n⏱️️ Final Volume Received: {final_ml_val:.1f} mL")
+                            print(f"\n⏱ Final Volume Received: {final_ml_val:.1f} mL")
                         except Exception as e:
                             print(f"⚠️ Error parsing final ml: {e}")
 
@@ -473,7 +515,6 @@ def _start_hardware_listener():
 
                             percent = min(100, round((dispensed_val / max(1.0, target_val)) * 100))
                             
-                            # Pag-update ng status label batay sa kung naka-pause o aktibo
                             if not getattr(shared_state, 'is_pump_paused', False):
                                 status_txt = f"💧 Dispensing: {percent}% ({shared_state.actual_dispensed_ml}mL / {shared_state.ml_to_dispense:.0f}mL)"
                                 print(f"\r{status_txt}", end="")
@@ -492,9 +533,6 @@ def _start_hardware_listener():
 
 
 def _startup_worker():
-    """
-    Tumatakbo sa background para hindi ma-freeze ang GUI.
-    """
     time.sleep(1.5)
     _set_status("⏳ Connecting to cloud...", "#F59E0B")
 
