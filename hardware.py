@@ -89,8 +89,10 @@ def process_scanned_student(scanned_uid):
     print(f"🪙 Waiting for coins or claim for user: {scanned_uid}...")
 
     # 1. COIN & CLAIM ACCUMULATION LOOP (Dito aabangan ang Claim o Barya)
+    # 1. COIN & CLAIM ACCUMULATION LOOP
     claimed_water = 0.0
     is_claimed_now = False
+    claim_wait_start = None  # Counter para sa claim timeout
 
     while shared_state.is_coin_accumulation_mode:
         try:
@@ -111,10 +113,11 @@ def process_scanned_student(scanned_uid):
             claimed_water = pending_water
             shared_state.current_user_pending_water = claimed_water
             is_claimed_now = True
+            claim_wait_start = time.time()  # Simulan ang timeout timer para sa Dispense
             
             print(f"📦 [CLAIM BUTTON PRESSED]: Successfully claimed {claimed_water} mL!")
             
-            # Ngayon pa lang natin buburahin sa Firebase para mawala ang Claim button at lumabas ang Dispense
+            # I-update ang Firebase para lumabas ang Dispense Button sa App
             user_ref.update({
                 'pending_ml': 0.0,
                 'claim_pending': False,
@@ -125,13 +128,45 @@ def process_scanned_student(scanned_uid):
             _set_status(f"📦 Claimed {claimed_water}mL! Maghulog ng barya o i-tap ang Dispense.", "#2ecc71")
             time.sleep(0.5)
 
-        # Timeout sa barya kung may hinulog
+        # ⏱️ 1. TIMEOUT KAPAG NAG-CLAIM PERO HINDI PININDOT ANG DISPENSE (30 Seconds)
+        if is_claimed_now and shared_state.coin_amount == 0:
+            if time.time() - claim_wait_start > 30.0:
+                print(f"\n⏰ [CLAIM DISPENSE TIMEOUT] Lumagpas sa 30s na hindi pinindot ang Dispense. Ibabalik sa pending_ml at magre-reset...")
+                
+                # A. Ibalik ang na-claim na tubig sa pending_ml sa Firebase
+                user_ref.update({
+                    'is_scanning': False,
+                    'coin_trigger': False,
+                    'is_claiming': False,
+                    'last_credits': 0,
+                    'pending_ml': claimed_water,
+                    'claim_pending': True
+                })
+                
+                # B. I-reset ang ESP32 Hardware kung nakakonekta
+                if shared_state.esp32:
+                    try:
+                        with shared_state.serial_lock:
+                            shared_state.esp32.write(b'TIMEOUT_RESET\n')
+                    except Exception as e:
+                        print(f"⚠️ Serial Write Error (TIMEOUT_RESET): {e}")
+
+                # C. Total Reset sa System States para sa susunod na transaction
+                shared_state.active_student_uid = None
+                shared_state.coin_amount = 0
+                shared_state.is_coin_accumulation_mode = False
+                
+                _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
+                print("🔒 Kiosk session reset complete. Ready for next student.")
+                return
+
+        # ⏱️ 2. TIMEOUT SA BARYA KUNG MAY HINULOG
         if shared_state.coin_amount > 0 and (time.time() - shared_state.last_coin_time > shared_state.timeout_duration):
             print(f"\n⏳ Coin insertion timeout. Total accumulated: ₱{shared_state.coin_amount}")
             shared_state.is_coin_accumulation_mode = False
             break
 
-        # Kiosk Session Timeout (40 seconds na walang barya at hindi nag-claim)
+        # ⏱️ 3. KIOSK SESSION TIMEOUT (40 seconds na walang barya at HINDI nag-claim)
         if shared_state.coin_amount == 0 and not is_claimed_now and (time.time() - shared_state.last_coin_time > 40.0):
             print(f"\n⏳ Kiosk Session Timeout. Walang barya at hindi nag-claim.")
             if shared_state.esp32:
@@ -143,14 +178,9 @@ def process_scanned_student(scanned_uid):
             shared_state.is_coin_accumulation_mode = False
             break
 
-        # Kung may hinulog na barya O kaya ay na-claim na, pwede nang mag-break para tumuloy sa dispense loop
-        if shared_state.coin_amount > 0 or is_claimed_now:
-            # Bibigyan natin ng konting sandali kung sakaling maghuhulog pa ng barya pagkatapos mag-claim,
-            # pero kung tapos na ang paghihintay ng barya, mag-break na paglipas ng ilang segundo o kapag pinindot ang dispense.
-            pass
-
-        # Kung direktang pinindot na ang Dispense button sa app habang nasa accumulation loop
+        # 📱 4. DISPENSE BUTTON TRIGGER: Kapag pinindot na ang Dispense sa Mobile App
         if current_status.get('is_dispensing') == True:
+            print("📱 Dispense button pressed in app. Proceeding to pour water...")
             shared_state.is_coin_accumulation_mode = False
             break
 
@@ -165,8 +195,8 @@ def process_scanned_student(scanned_uid):
         print("⏳ Walang barya at walang na-claim na tubig. Kina-cancel ang session.")
         shared_state.active_student_uid = None
         _set_status("⏳ Ready to Scan QR Code", "#2ecc71")
-        return
-
+        return#<==========================
+    
     user_ref.update({
         'last_credits': shared_state.coin_amount, 
         'target_volume': shared_state.ml_to_dispense,
