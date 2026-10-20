@@ -234,7 +234,7 @@ def process_scanned_student(scanned_uid):
             # ----------------------------------------------------
             if current_status.get('is_dispensing') == True:
 
-                user_ref.update({'coin_trigger': False, 'is_dispensing': False})
+                user_ref.update({'coin_trigger': False})
                 
                 dispense_started = True
                 shared_state.actual_dispensed_ml = 0.0
@@ -293,6 +293,35 @@ def process_scanned_student(scanned_uid):
 
                 # 3. DISPENSING PROGRESS MONITORING LOOP
                 while shared_state.is_flow_monitoring_mode:
+                    
+                    # 📱 SURIIN KUNG NAG-TRIGGER NG PAUSE/RESUME SA MOBILE APP
+                    try:
+                        app_status = user_ref.get() or {}
+                        app_paused = app_status.get('is_paused', False)
+
+                        # Kapag nag-pause sa App pero tumatakbo pa ang bomba sa Hardware
+                        if app_paused and not getattr(shared_state, 'is_pump_paused', False):
+                            shared_state.is_pump_paused = True
+                            shared_state.pause_started_at = time.time()
+                            if shared_state.esp32:
+                                with shared_state.serial_lock:
+                                    shared_state.esp32.write(b'PAUSE_PUMP\n')
+                            print("\n⏸️ Pump paused via Mobile App.")
+                            _set_status("⏸️ Dispensing Paused via App", "#F59E0B")
+
+                        # Kapag nag-resume sa App habang naka-pause ang Hardware
+                        elif not app_paused and getattr(shared_state, 'is_pump_paused', False):
+                            pause_duration = time.time() - getattr(shared_state, 'pause_started_at', time.time())
+                            shared_state.paused_time_offset = getattr(shared_state, 'paused_time_offset', 0.0) + pause_duration
+                            shared_state.is_pump_paused = False
+                            if shared_state.esp32:
+                                with shared_state.serial_lock:
+                                    shared_state.esp32.write(b'RESUME_PUMP\n')
+                            print("\n▶️ Pump resumed via Mobile App.")
+                            _set_status(f"💧 Dispensing Water... ({shared_state.ml_to_dispense:.0f}mL Target)", "#059669")
+                    except Exception as e:
+                        print(f"⚠️ Error checking app pause status: {e}")
+                    
                     if not getattr(shared_state, 'is_pump_paused', False):
                         active_time = (time.time() - start_flow_time) - getattr(shared_state, 'paused_time_offset', 0.0)
                         if active_time > SAFETY_TIMEOUT_SECONDS:
@@ -330,6 +359,8 @@ def process_scanned_student(scanned_uid):
                         'is_scanning': False,
                         'coin_trigger': False,
                         'last_credits': 0,
+                        'is_dispensing': False,
+                        'is_paused': False,
                         'pending_ml': remainder_ml,
                         'claim_pending': True if remainder_ml > 0 else False
                     })
@@ -362,6 +393,8 @@ def process_scanned_student(scanned_uid):
                     'is_scanning': False,
                     'coin_trigger': False,
                     'last_credits': 0,
+                    'is_dispensing': False,
+                    'is_paused': False,
                     'pending_ml': remainder_ml,
                     'claim_pending': True if remainder_ml > 5.0 else False
                 })
