@@ -5,6 +5,7 @@ import threading
 from firebase_admin import db
 import shared_state
 import firebase_handler
+import firebase_admin
 
 # ============================================
 # SETTINGS
@@ -30,12 +31,20 @@ def _set_status(text, color):
 # ============================================
 # PROCESS SCANNED STUDENT (QR / RFID LOGIC)
 # ============================================
-# ============================================
-# PROCESS SCANNED STUDENT (QR / RFID LOGIC)
-# ============================================
+import firebase_admin
+
 def process_scanned_student(scanned_uid):
     scanned_uid = scanned_uid.strip()
     if not scanned_uid:
+        return
+
+    # 🛑 PROTEKSYON: Siguraduhing initialized na ang Firebase bago mag-query
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        print("⚠️ [WARNING]: Sinubukan mag-scan habang nag-i-initialize pa ang Firebase. Subukang muli sandali.")
+        _set_status("⚠️ System initializing...", "#e74c3c")
+        shared_state.active_student_uid = None
         return
 
     user_ref = db.reference(f'users/{scanned_uid}')
@@ -52,12 +61,23 @@ def process_scanned_student(scanned_uid):
 
     shared_state.active_student_uid = scanned_uid
     
+    vendo_name = "H2O Hub Vending Machine" # Default fallback
+    try:
+        if hasattr(shared_state, 'VENDO_ID') and shared_state.VENDO_ID:
+            v_name_ref = db.reference(f'vendos/{shared_state.VENDO_ID}/name')
+            fetched_name = v_name_ref.get()
+            if fetched_name:
+                vendo_name = fetched_name
+    except Exception as e:
+        print(f"⚠️ Error fetching vendo name: {e}")
+
     # I-set muna sa True ang is_scanning para sa UI ng app
     user_ref.update({
         'coin_trigger': False, 
         'is_scanning': True, 
         'is_dispensing': False,
-        'last_credits': 0
+        'last_credits': 0,
+        'last_scanned_vendo': vendo_name
     })
 
     if pending_water > 0 and claim_pending:
@@ -86,7 +106,7 @@ def process_scanned_student(scanned_uid):
         except Exception as e:
             print(f"⚠️ Serial Write Error (READY_FOR_COINS): {e}")
 
-    print(f"🪙 Waiting for coins or claim for user: {scanned_uid}...")
+    print(f"🪙 Waiting for coins or claim for user: {scanned_uid} at vendo: {vendo_name}...")
 
     # 1. COIN & CLAIM ACCUMULATION LOOP (Dito aabangan ang Claim o Barya)
     # 1. COIN & CLAIM ACCUMULATION LOOP
@@ -577,20 +597,41 @@ def _start_hardware_listener():
                         )
 
                 elif hardware_data == "PUMP_PAUSED":
-                    shared_state.is_pump_paused = True
-                    shared_state.pause_started_at = time.time()
-                    print("\n⏸️ Pump paused via physical button.")
-                    _set_status("⏸️ Dispensing Paused (Pindutin ang button sa Kiosk para ituloy)", "#F59E0B")
+                    # Tiyakin na HINDI PA naka-pause para iwas paulit-ulit na trigger
+                    if not getattr(shared_state, 'is_pump_paused', False):
+                        shared_state.is_pump_paused = True
+                        shared_state.pause_started_at = time.time()
+                        print("\n⏸️ Pump paused via physical button.")
+                        _set_status("⏸️ Dispensing Paused (Pindutin ang button sa Kiosk para ituloy)", "#F59E0B")
+                        
+                        if shared_state.active_student_uid:
+                            try:
+                                db.reference(f'users/{shared_state.active_student_uid}').update({
+                                    'is_paused': True
+                                })
+                                print("☁️ Firebase updated: is_paused = True")
+                            except Exception as e:
+                                print(f"⚠️ Error updating pause to Firebase: {e}")
 
                 elif hardware_data == "PUMP_RESUMED":
+                    # Tiyakin na NAKA-PAUSE TALAGA bago mag-resume para iwas toggle loop
                     if getattr(shared_state, 'is_pump_paused', False):
                         pause_duration = time.time() - getattr(shared_state, 'pause_started_at', time.time())
                         shared_state.paused_time_offset = getattr(shared_state, 'paused_time_offset', 0.0) + pause_duration
-                    
-                    shared_state.is_pump_paused = False
-                    print("\n▶️ Pump resumed via physical button.")
-                    _set_status(f"💧 Dispensing Water... ({shared_state.ml_to_dispense:.0f}mL Target)", "#059669")
-
+                        
+                        shared_state.is_pump_paused = False
+                        print("\n▶️ Pump resumed via physical button.")
+                        _set_status(f"💧 Dispensing Water... ({shared_state.ml_to_dispense:.0f}mL Target)", "#059669")
+                        
+                        if shared_state.active_student_uid:
+                            try:
+                                db.reference(f'users/{shared_state.active_student_uid}').update({
+                                    'is_paused': False
+                                })
+                                print("☁️ Firebase updated: is_paused = False")
+                            except Exception as e:
+                                print(f"⚠️ Error updating resume to Firebase: {e}")
+                                
                 elif shared_state.is_flow_monitoring_mode:
 
                     if hardware_data.startswith("DISPENSED_FINAL_ML:"):
